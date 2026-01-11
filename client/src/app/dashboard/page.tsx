@@ -1,143 +1,495 @@
-'use client'
+'use client';
 
-import { useAuth } from '@/context/AuthContext'
-import { useRouter } from 'next/navigation'
-import { useEffect, useState } from 'react'
-import { motion } from 'framer-motion'
-import { Loader2 } from 'lucide-react'
-import { QueryInput } from '@/components/dashboard/QueryInput'
-import { ResponseCard } from '@/components/dashboard/ResponseCard'
-import { QueryHistory } from '@/components/dashboard/QueryHistory'
-import { useToast } from '@/components/ui/use-toast'
-import { queryAPI } from '@/lib/api'
-import { Container, Grid, Paper, Typography, Chip, Box } from '@mui/material'
+import { useMemo, useRef, useEffect, useState } from 'react';
+import {
+  AppBar,
+  Avatar,
+  Box,
+  Button,
+  Chip,
+  CircularProgress,
+  CssBaseline,
+  Divider,
+  Drawer,
+  IconButton,
+  LinearProgress,
+  Menu,
+  MenuItem,
+  Paper,
+  Stack,
+  TextField,
+  Toolbar,
+  Typography,
+  createTheme,
+  ThemeProvider,
+  Tooltip,
+  Popover,
+} from '@mui/material';
+import AddIcon from '@mui/icons-material/Add';
+import SendIcon from '@mui/icons-material/Send';
+import AccountCircleIcon from '@mui/icons-material/AccountCircle';
+import SettingsIcon from '@mui/icons-material/Settings';
+import LogoutIcon from '@mui/icons-material/Logout';
+import SearchIcon from '@mui/icons-material/Search';
+import LightbulbIcon from '@mui/icons-material/Lightbulb';
+import StorageIcon from '@mui/icons-material/Storage';
+import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
+import LibraryBooksIcon from '@mui/icons-material/LibraryBooks';
+import ExploreIcon from '@mui/icons-material/Explore';
+import Groups2Icon from '@mui/icons-material/Groups2';
+import PaidIcon from '@mui/icons-material/Paid';
+import MoreHorizIcon from '@mui/icons-material/MoreHoriz';
+import NotificationsNoneIcon from '@mui/icons-material/NotificationsNone';
+import WorkspacePremiumIcon from '@mui/icons-material/WorkspacePremium';
+import DownloadIcon from '@mui/icons-material/Download';
 
-export default function DashboardPage() {
-  const { user, loading: authLoading } = useAuth()
-  const router = useRouter()
-  const { toast } = useToast()
-  const [responses, setResponses] = useState<any[]>([])
-  const [loading, setLoading] = useState(false)
-  const [currentQuery, setCurrentQuery] = useState('')
+const drawerWidth = 72;
 
-  useEffect(() => {
-    if (!authLoading && !user) {
-      router.push('/login')
-    }
-  }, [user, authLoading, router])
+type Msg = {
+  role: 'user' | 'assistant';
+  content: string;
+  model?: string;
+  timestamp?: number;
+  resources?: { query_time: number; tokens: number; model: string }[];
+};
 
-  const handleSubmitQuery = async (queryText: string, selectedAgents: string[]) => {
-    setLoading(true)
-    setCurrentQuery(queryText)
-    try {
-      const response = await queryAPI.submit(queryText, selectedAgents)
-      setResponses(response.data.responses)
-      toast({
-        title: 'Query submitted successfully! 🎉',
-        description: `Got responses from ${response.data.responses.length} models`,
-      })
-    } catch (error: any) {
-      toast({
-        title: 'Error submitting query',
-        description: error.response?.data?.detail || 'Something went wrong',
-        variant: 'destructive',
-      })
-    } finally {
-      setLoading(false)
-    }
-  }
+const MODELS = [
+  { id: 'gpt-4', name: 'GPT-4', provider: 'OpenAI', icon: '🤖' },
+  { id: 'claude-3', name: 'Claude 3', provider: 'Anthropic', icon: '🧠' },
+  { id: 'perplexity', name: 'Perplexity', provider: 'Perplexity AI', icon: '🔍' },
+];
 
-  if (authLoading) {
-    return (
-      <Box sx={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <Loader2 className="w-8 h-8 animate-spin" color="#22d3ee" />
-      </Box>
-    )
-  }
+export default function DashboardPerplexity() {
+  const [prompt, setPrompt] = useState('');
+  const [history] = useState<string[]>([
+    'Summarize latest AI trends 2025',
+    'Compare LLM performance benchmarks',
+    'Best practices for prompt engineering',
+  ]);
+  const [messages, setMessages] = useState<Msg[]>([
+    {
+      role: 'assistant',
+      content:
+        "Welcome! I'm your AI research assistant. I can search across multiple models and provide sources.",
+      model: 'system',
+    },
+  ]);
+
+  const [isLoading, setIsLoading] = useState(false);
+  const [selectedModels, setSelectedModels] = useState<string[]>(['gpt-4', 'claude-3']);
+  const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
+  const [focusMode, setFocusMode] = useState<'research' | 'writing' | 'default'>('default');
+  const [modelHover, setModelHover] = useState<{ anchor: HTMLElement | null; id: string | null }>({
+    anchor: null,
+    id: null,
+  });
+  const [focusHoverAnchor, setFocusHoverAnchor] = useState<HTMLElement | null>(null);
+
+  const endRef = useRef<HTMLDivElement>(null);
+  useEffect(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }), [messages.length]);
+
+  const theme = useMemo(
+    () =>
+      createTheme({
+        palette: {
+          mode: 'dark',
+          background: { default: '#070B14', paper: '#0B1220' },
+          primary: { main: '#00E5FF' },
+        },
+        shape: { borderRadius: 12 },
+        typography: {
+          fontFamily: 'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial',
+        },
+      }),
+    []
+  );
+
+  const handleSend = async () => {
+    const text = prompt.trim();
+    if (!text || isLoading) return;
+
+    setMessages((prev) => [...prev, { role: 'user', content: text, timestamp: Date.now() }]);
+    setPrompt('');
+    setIsLoading(true);
+
+    setTimeout(() => {
+      const mockResources = {
+        query_time: Math.random() * 2 + 0.5,
+        tokens: Math.floor(Math.random() * 500 + 100),
+        model: selectedModels[0] || 'gpt-4',
+      };
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: `Searching across ${selectedModels.length} model(s) in ${focusMode} mode...\n\nKey findings:\n• Result 1: Generated from ${mockResources.model}\n• Result 2: Cross-referenced with sources\n• Result 3: Verified across models`,
+          model: selectedModels[0],
+          resources: [mockResources],
+          timestamp: Date.now(),
+        },
+      ]);
+      setIsLoading(false);
+    }, 1200);
+  };
 
   return (
-    <Container maxWidth="lg" sx={{ minHeight: '100vh', py: 6 }}>
-      <Box sx={{ display: 'grid', gap: 5 }}>
-        {/* Header */}
-        <motion.div initial={{ opacity: 0, y: -16 }} animate={{ opacity: 1, y: 0 }}>
-          <Box sx={{ display: 'grid', gap: 2 }}>
-            <Chip label="Live runspace" size="small" variant="outlined" sx={{ width: 'fit-content', borderColor: 'rgba(30,41,59,0.8)', bgcolor: 'rgba(2,6,23,0.7)', color: 'text.secondary' }} />
-            <Box>
-              <Typography variant="h4" sx={{ fontWeight: 700, lineHeight: 1.2 }}>
-                Welcome back, <Box component="span" sx={{ background: 'linear-gradient(90deg,#22d3ee,#f59e0b)', WebkitBackgroundClip: 'text', color: 'transparent' }}>{user?.full_name}</Box>
-              </Typography>
-              <Typography variant="body1" sx={{ color: 'text.secondary', mt: 1.5, maxWidth: 640 }}>
-                Orchestrate multiple LLMs in parallel, compare answers instantly, and keep your best prompts close.
-              </Typography>
-            </Box>
-            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
-              {['Cache-aware', 'Latency tracking', 'Diff-friendly outputs'].map((pill) => (
-                <Chip key={pill} label={pill} size="small" variant="outlined" sx={{ borderColor: 'rgba(30,41,59,0.8)', bgcolor: 'rgba(2,6,23,0.7)', color: 'text.secondary' }} />
-              ))}
-            </Box>
-          </Box>
-        </motion.div>
+    <ThemeProvider theme={theme}>
+      <CssBaseline />
 
-        {/* Stats */}
-        <Grid container spacing={2}>
-          {[{
-            label: 'Daily quota',
-            value: `${user?.quota_daily || 50} queries`,
-            gradient: 'linear-gradient(135deg, rgba(34,211,238,0.25), rgba(37,99,235,0.18))',
-          }, {
-            label: 'Status',
-            value: 'Active',
-            gradient: 'linear-gradient(135deg, rgba(16,185,129,0.25), rgba(45,212,191,0.18))',
-          }, {
-            label: 'Models available',
-            value: '3 models',
-            gradient: 'linear-gradient(135deg, rgba(251,191,36,0.25), rgba(236,72,153,0.18))',
-          }].map((card, idx) => (
-            <Grid item xs={12} md={4} key={card.label}>
-              <motion.div initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.08 * (idx + 1) }}>
-                <Paper elevation={0} sx={{ position: 'relative', overflow: 'hidden', borderRadius: 3, border: '1px solid rgba(30,41,59,0.8)', bgcolor: 'rgba(1,4,14,0.85)', p: 3, boxShadow: '0 18px 60px -40px rgba(0,0,0,0.8)' }}>
-                  <Box sx={{ position: 'absolute', inset: 0, background: card.gradient, opacity: 0.8 }} />
-                  <Box sx={{ position: 'relative', display: 'grid', gap: 0.5 }}>
-                    <Typography variant="caption" sx={{ color: 'text.secondary' }}>{card.label}</Typography>
-                    <Typography variant="h6" sx={{ fontWeight: 700 }}>{card.value}</Typography>
-                  </Box>
-                </Paper>
-              </motion.div>
-            </Grid>
-          ))}
-        </Grid>
+      <Box sx={{ display: 'flex', minHeight: '100vh', bgcolor: '#070B14' }}>
+        {/* Slim left icon rail */}
+        <Drawer
+          variant="permanent"
+          sx={{
+            width: drawerWidth,
+            flexShrink: 0,
+            '& .MuiDrawer-paper': {
+              width: drawerWidth,
+              boxSizing: 'border-box',
+              borderRight: '1px solid rgba(255,255,255,0.08)',
+              bgcolor: '#0B1220',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'stretch',
+            },
+          }}
+        >
+          <Box sx={{ p: 1.5, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <AutoAwesomeIcon sx={{ color: '#00E5FF', fontSize: 24 }} />
+          </Box>
+          <Divider />
+          <Stack sx={{ px: 0.5, py: 1, alignItems: 'center' }} spacing={1.5}>
+            <Tooltip title="New" placement="right">
+              <IconButton size="small" onClick={() => setMessages([{ role: 'assistant', content: 'New chat started.' }])}>
+                <AddIcon />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Library" placement="right">
+              <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                <IconButton size="small"><LibraryBooksIcon /></IconButton>
+                <Typography variant="caption" sx={{ fontSize: 10, color: 'text.secondary' }}>Library</Typography>
+              </Box>
+            </Tooltip>
+            <Tooltip title="More" placement="right">
+              <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                <IconButton size="small"><MoreHorizIcon /></IconButton>
+                <Typography variant="caption" sx={{ fontSize: 10, color: 'text.secondary' }}>More</Typography>
+              </Box>
+            </Tooltip>
+          </Stack>
+          <Box sx={{ flex: 1 }} />
+          <Stack sx={{ px: 0.5, pb: 1.5, alignItems: 'center' }} spacing={1.5}>
+            <Tooltip title="Notifications" placement="right">
+              <IconButton size="small"><NotificationsNoneIcon /></IconButton>
+            </Tooltip>
+            <Tooltip title="Account" placement="right">
+              <IconButton size="small" onClick={(e) => setAnchorEl(e.currentTarget)}>
+                <Avatar sx={{ width: 24, height: 24, bgcolor: '#00E5FF' }}>R</Avatar>
+              </IconButton>
+            </Tooltip>
+          </Stack>
+          <Menu anchorEl={anchorEl} open={!!anchorEl} onClose={() => setAnchorEl(null)}>
+            <MenuItem>
+              <AccountCircleIcon sx={{ mr: 1 }} /> Profile
+            </MenuItem>
+            <MenuItem>
+              <SettingsIcon sx={{ mr: 1 }} /> Settings
+            </MenuItem>
+            <Divider />
+            <MenuItem>
+              <LogoutIcon sx={{ mr: 1 }} /> Logout
+            </MenuItem>
+          </Menu>
+        </Drawer>
 
         {/* Main Content */}
-        <Grid container spacing={2}>
-          <Grid item xs={12} lg={8}>
-            <motion.div initial={{ opacity: 0, x: -16 }} animate={{ opacity: 1, x: 0 }}>
-              <QueryInput onSubmit={handleSubmitQuery} loading={loading} />
-            </motion.div>
-          </Grid>
-          <Grid item xs={12} lg={4}>
-            <motion.div initial={{ opacity: 0, x: 16 }} animate={{ opacity: 1, x: 0 }}>
-              <QueryHistory />
-            </motion.div>
-          </Grid>
-        </Grid>
+        <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+          {/* Top Bar */}
+          <AppBar
+            position="sticky"
+            elevation={0}
+            sx={{
+              bgcolor: 'rgba(7,11,20,0.7)',
+              backdropFilter: 'blur(12px)',
+              borderBottom: '1px solid rgba(255,255,255,0.08)',
+            }}
+          >
+            <Toolbar>
+              <LightbulbIcon sx={{ mr: 1, color: '#00E5FF' }} />
+              <Typography fontWeight={700}>Research Assistant</Typography>
+              <Box sx={{ flex: 1 }} />
+              <Chip
+                label={`${selectedModels.length} model${selectedModels.length > 1 ? 's' : ''}`}
+                size="small"
+                variant="outlined"
+                sx={{ mr: 1 }}
+              />
+              <Chip
+                label={`${focusMode} mode`}
+                size="small"
+                icon={<SearchIcon />}
+                variant="filled"
+                color="primary"
+              />
+            </Toolbar>
+            {isLoading && <LinearProgress sx={{ height: 2 }} />}
+          </AppBar>
 
-        {/* Responses */}
-        {responses.length > 0 && (
-          <motion.div initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
-              <Typography variant="h6" sx={{ fontWeight: 700 }}>Responses</Typography>
-              <Typography variant="body2" sx={{ color: 'text.secondary' }}>{responses.length} models returned</Typography>
-            </Box>
-            <Grid container spacing={2}>
-              {responses.map((response, index) => (
-                <Grid item xs={12} md={6} lg={4} key={response.agent_id}>
-                  <ResponseCard response={response} index={index} />
-                </Grid>
+          {/* Messages */}
+          <Box sx={{ flex: 1, px: { xs: 3, md: 4 }, py: 4, overflowY: 'auto' }}>
+            <Stack spacing={3} sx={{ maxWidth: 1120, mx: 'auto' }}>
+              {messages.map((m, idx) => (
+                <Box key={idx}>
+                  <Stack
+                    direction="row"
+                    justifyContent={m.role === 'user' ? 'flex-end' : 'flex-start'}
+                    sx={{ mb: 0.75 }}
+                  >
+                    {m.role === 'assistant' && (
+                      <Avatar sx={{ mr: 1.25, width: 36, height: 36, bgcolor: '#00E5FF' }}>
+                        {m.model?.charAt(0).toUpperCase() || 'A'}
+                      </Avatar>
+                    )}
+                    <Paper
+                      variant="outlined"
+                      sx={{
+                        px: 3,
+                        py: 2,
+                        maxWidth: '80%',
+                        bgcolor: m.role === 'user' ? 'rgba(0, 229, 255, 0.08)' : 'rgba(255,255,255,0.03)',
+                        borderColor: m.role === 'user' ? 'rgba(0, 229, 255, 0.2)' : 'rgba(255,255,255,0.1)',
+                        borderRadius: 2.5,
+                      }}
+                    >
+                      <Typography whiteSpace="pre-wrap" lineHeight={1.9} variant="body1">
+                        {m.content}
+                      </Typography>
+                      {m.resources && (
+                        <Box sx={{ mt: 1.5, pt: 1.5, borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+                          {m.resources.map((r, i) => (
+                            <Stack key={i} direction="row" spacing={1} sx={{ mt: 0.75 }} alignItems="center">
+                              <StorageIcon sx={{ fontSize: 14, color: '#00E5FF' }} />
+                              <Typography variant="caption" color="text.secondary">
+                                {r.model} • {r.tokens} tokens • {r.query_time.toFixed(2)}s
+                              </Typography>
+                            </Stack>
+                          ))}
+                        </Box>
+                      )}
+                    </Paper>
+                    {m.role === 'user' && (
+                      <Avatar sx={{ ml: 1.25, width: 36, height: 36, bgcolor: '#00E5FF' }}>R</Avatar>
+                    )}
+                  </Stack>
+                  {m.role === 'assistant' && m.model && (
+                    <Typography variant="caption" color="text.secondary" sx={{ ml: 5 }}>
+                      {m.model.toUpperCase()}
+                    </Typography>
+                  )}
+                </Box>
               ))}
-            </Grid>
-          </motion.div>
-        )}
+              {isLoading && (
+                <Stack direction="row" spacing={1} alignItems="flex-end">
+                  <CircularProgress size={24} sx={{ color: '#00E5FF' }} />
+                  <Typography variant="body2" color="text.secondary">
+                    Searching across models...
+                  </Typography>
+                </Stack>
+              )}
+              <div ref={endRef} />
+            </Stack>
+          </Box>
+
+          {/* Composer */}
+          <Box
+            sx={{
+              borderTop: '1px solid rgba(255,255,255,0.08)',
+              bgcolor: 'rgba(7,11,20,0.75)',
+              backdropFilter: 'blur(12px)',
+              px: { xs: 3, md: 4 },
+              py: 2.5,
+            }}
+          >
+            <Stack spacing={1.75} sx={{ maxWidth: 1120, mx: 'auto' }}>
+              {messages.length === 1 && (
+                <Stack direction="row" spacing={1}>
+                  {['Explain quantum computing', 'Latest AI breakthroughs', 'Best LLM for coding'].map((suggest) => (
+                    <Button
+                      key={suggest}
+                      size="small"
+                      variant="outlined"
+                      onClick={() => setPrompt(suggest)}
+                      sx={{ textTransform: 'none', borderRadius: 2, fontSize: 12 }}
+                    >
+                      ✨ {suggest}
+                    </Button>
+                  ))}
+                </Stack>
+              )}
+
+              {/* Inline quick toggles */}
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Tooltip title="Select models" placement="top">
+                  <Chip
+                    label={`${selectedModels.length} models`}
+                    color="primary"
+                    variant="outlined"
+                    onClick={(e) => setModelHover({ anchor: e.currentTarget as HTMLElement, id: null })}
+                    onMouseEnter={(e) => setModelHover({ anchor: e.currentTarget, id: null })}
+                    onMouseLeave={() => setModelHover({ anchor: null, id: null })}
+                    sx={{ borderRadius: 2 }}
+                  />
+                </Tooltip>
+                {MODELS.map((m) => (
+                  <Tooltip key={m.id} title={`${m.name} (${m.provider})`} placement="top">
+                    <Chip
+                      label={`${m.icon} ${m.name}`}
+                      variant={selectedModels.includes(m.id) ? 'filled' : 'outlined'}
+                      color={selectedModels.includes(m.id) ? 'primary' : 'default'}
+                      onClick={() => {
+                        setSelectedModels((prev) =>
+                          prev.includes(m.id) ? prev.filter((x) => x !== m.id) : [...prev, m.id]
+                        );
+                      }}
+                      onMouseEnter={(e) => setModelHover({ anchor: e.currentTarget, id: m.id })}
+                      onMouseLeave={() => setModelHover({ anchor: null, id: null })}
+                      sx={{ borderRadius: 2 }}
+                    />
+                  </Tooltip>
+                ))}
+                <Box sx={{ width: 12 }} />
+                <Tooltip title="Focus mode" placement="top">
+                  <Chip
+                    label={`${focusMode} mode`}
+                    icon={<SearchIcon />}
+                    onClick={(e) => setFocusHoverAnchor(e.currentTarget as HTMLElement)}
+                    onMouseEnter={(e) => setFocusHoverAnchor(e.currentTarget)}
+                    onMouseLeave={() => setFocusHoverAnchor(null)}
+                    sx={{ borderRadius: 2 }}
+                  />
+                </Tooltip>
+              </Stack>
+
+              <Stack direction="row" spacing={1}>
+                <TextField
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  fullWidth
+                  placeholder="Ask me anything about AI, research, or code..."
+                  multiline
+                  maxRows={6}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey && !isLoading) {
+                      e.preventDefault();
+                      handleSend();
+                    }
+                  }}
+                  sx={{
+                    '& .MuiOutlinedInput-root': {
+                      borderRadius: 2.5,
+                      bgcolor: 'rgba(0, 229, 255, 0.03)',
+                    },
+                  }}
+                />
+                <IconButton
+                  onClick={handleSend}
+                  disabled={!prompt.trim() || isLoading}
+                  sx={{
+                    width: 52,
+                    height: 52,
+                    borderRadius: 2.5,
+                    bgcolor: 'rgba(0, 229, 255, 0.14)',
+                    '&:hover': { bgcolor: 'rgba(0, 229, 255, 0.22)' },
+                    '&.Mui-disabled': { bgcolor: 'rgba(0, 229, 255, 0.05)' },
+                  }}
+                >
+                  <SendIcon />
+                </IconButton>
+              </Stack>
+              <Typography variant="caption" color="text.secondary">
+                Shift+Enter for new line • Select models above
+              </Typography>
+            </Stack>
+          </Box>
+        </Box>
+
+        {/* Hover Popovers */}
+        <Popover
+          open={Boolean(modelHover.anchor)}
+          anchorEl={modelHover.anchor}
+          onClose={() => setModelHover({ anchor: null, id: null })}
+          anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
+          transformOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+          disableRestoreFocus
+          PaperProps={{ sx: { p: 1.5, bgcolor: '#0B1220', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 2 } }}
+        >
+          <Stack spacing={1} sx={{ minWidth: 220 }}>
+            {modelHover.id ? (
+              <>
+                <Typography variant="body2" fontWeight={700}>
+                  {MODELS.find((x) => x.id === modelHover.id)?.icon}{' '}
+                  {MODELS.find((x) => x.id === modelHover.id)?.name}
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {MODELS.find((x) => x.id === modelHover.id)?.provider || ''}
+                </Typography>
+                <Stack direction="row" spacing={1}>
+                  <Button
+                    size="small"
+                    variant={selectedModels.includes(modelHover.id) ? 'contained' : 'outlined'}
+                    onClick={() => {
+                      const id = modelHover.id;
+                      if (!id) return;
+                      setSelectedModels((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+                    }}
+                  >
+                    {selectedModels.includes(modelHover.id) ? 'Selected' : 'Select'}
+                  </Button>
+                </Stack>
+              </>
+            ) : (
+              <>
+                <Typography variant="body2" fontWeight={700}>Active models</Typography>
+                <Stack direction="row" spacing={1}>
+                  {selectedModels.map((id) => (
+                    <Chip key={id} label={MODELS.find((m) => m.id === id)?.name || id} size="small" />
+                  ))}
+                </Stack>
+              </>
+            )}
+          </Stack>
+        </Popover>
+
+        <Popover
+          open={Boolean(focusHoverAnchor)}
+          anchorEl={focusHoverAnchor}
+          onClose={() => setFocusHoverAnchor(null)}
+          anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
+          transformOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+          disableRestoreFocus
+          PaperProps={{ sx: { p: 1.5, bgcolor: '#0B1220', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 2 } }}
+        >
+          <Stack spacing={1} sx={{ minWidth: 240 }}>
+            <Typography variant="body2" fontWeight={700}>Focus mode</Typography>
+            <Stack direction="row" spacing={1}>
+              {(['default', 'research', 'writing'] as const).map((mode) => (
+                <Chip
+                  key={mode}
+                  label={mode}
+                  color={focusMode === mode ? 'primary' : 'default'}
+                  variant={focusMode === mode ? 'filled' : 'outlined'}
+                  onClick={() => setFocusMode(mode)}
+                  sx={{ textTransform: 'capitalize', borderRadius: 2 }}
+                />
+              ))}
+            </Stack>
+            <Typography variant="caption" color="text.secondary">
+              Default: balanced • Research: facts & sources • Writing: style & clarity
+            </Typography>
+          </Stack>
+        </Popover>
       </Box>
-    </Container>
-  )
+    </ThemeProvider>
+  );
 }

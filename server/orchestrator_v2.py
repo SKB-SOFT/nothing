@@ -342,7 +342,7 @@ async def orchestrate_query(
     tasks = [
         asyncio.wait_for(
             _query_with_retries(pid, query_text, timeout=timeout, max_retries=2),
-            timeout=timeout,
+            timeout=timeout + 10,
         )
         for pid in to_run
     ]
@@ -401,6 +401,10 @@ async def orchestrate_query(
             await db.commit()
         except Exception as e:
             print(f"Warning: Failed to commit cache: {e}")
+            try:
+                await db.rollback()
+            except Exception:
+                pass
     
     # Combine all responses
     all_responses = {**cached_responses, **new_responses}

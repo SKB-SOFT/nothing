@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useRef, useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   AppBar,
   Avatar,
@@ -25,7 +26,8 @@ import {
   Tooltip,
   Popover,
 } from '@mui/material';
-import { queryAPI } from '@/lib/api';
+import { apiClient, queryAPI } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
 import AddIcon from '@mui/icons-material/Add';
 import SendIcon from '@mui/icons-material/Send';
 import AccountCircleIcon from '@mui/icons-material/AccountCircle';
@@ -54,6 +56,17 @@ type Msg = {
   resources?: { query_time: number; tokens: number; model: string }[];
 };
 
+type ProviderInfo = {
+  name: string;
+  tier?: string;
+  quota?: string;
+  enabled?: boolean;
+  initialized: boolean;
+  default_model?: string;
+  status?: string;
+  error?: string | null;
+};
+
 const MODELS = [
   { id: 'groq', name: 'Groq (Mixtral)', provider: 'Groq', icon: '⚡' },
   { id: 'gemini', name: 'Gemini 2.0', provider: 'Google', icon: '🔮' },
@@ -64,6 +77,9 @@ const MODELS = [
 ];
 
 export default function DashboardPerplexity() {
+  const router = useRouter();
+  const { user, token, loading: authLoading, logout } = useAuth();
+
   const [mounted, setMounted] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [history] = useState<string[]>([
@@ -81,7 +97,8 @@ export default function DashboardPerplexity() {
   ]);
 
   const [isLoading, setIsLoading] = useState(false);
-  const [selectedModels, setSelectedModels] = useState<string[]>(['groq', 'gemini']);
+  const [selectedModels, setSelectedModels] = useState<string[]>(MODELS.map((m) => m.id));
+  const [providers, setProviders] = useState<Record<string, ProviderInfo> | null>(null);
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const [focusMode, setFocusMode] = useState<'research' | 'writing' | 'default'>('default');
   const [modelHover, setModelHover] = useState<{ anchor: HTMLElement | null; id: string | null }>({
@@ -95,6 +112,38 @@ export default function DashboardPerplexity() {
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiClient.get('/api/providers');
+        const map = (res.data?.providers ?? null) as Record<string, ProviderInfo> | null;
+        if (!cancelled) setProviders(map);
+      } catch {
+        if (!cancelled) setProviders(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!providers) return;
+    const initializedIds = MODELS.filter((m) => providers[m.id]?.initialized).map((m) => m.id);
+    setSelectedModels((prev) => {
+      const filteredPrev = prev.filter((id) => providers[id]?.initialized);
+      if (filteredPrev.length > 0) return filteredPrev;
+      return initializedIds.length > 0 ? initializedIds : prev;
+    });
+  }, [providers]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    if (authLoading) return;
+    // Guest mode: do not redirect to login.
+  }, [authLoading, mounted]);
   
   useEffect(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }), [messages.length]);
 
@@ -118,6 +167,8 @@ export default function DashboardPerplexity() {
     const text = prompt.trim();
     if (!text || isLoading) return;
 
+    // Guest mode: allow queries without a token.
+
     setMessages((prev) => [...prev, { role: 'user', content: text, timestamp: Date.now() }]);
     setPrompt('');
     setIsLoading(true);
@@ -126,19 +177,17 @@ export default function DashboardPerplexity() {
       const response = await queryAPI.submit(text, selectedModels);
       const data = response.data;
 
-      // Format responses from all models
-      let content = `Queried ${selectedModels.length} model(s) in ${focusMode} mode:\n\n`;
-      
-      if (data.responses && data.responses.length > 0) {
-        data.responses.forEach((res: any, idx: number) => {
-          const status = res.status === 'success' ? '✅' : '❌';
-          content += `\n### ${status} ${res.agent_name} (${res.response_time_ms.toFixed(0)}ms)\n`;
-          if (res.status === 'success') {
-            content += `${res.response_text}\n`;
-          } else {
-            content += `Error: ${res.error_message}\n`;
-          }
-        });
+      // Prefer clean single-answer field from backend
+      let content: string = (typeof data.final_answer === 'string' && data.final_answer.trim())
+        ? data.final_answer.trim()
+        : 'No answer returned.';
+
+      // Compact failure summary (optional)
+      if (Array.isArray(data.errors) && data.errors.length > 0) {
+        const lines = data.errors
+          .slice(0, 6)
+          .map((e: any) => `- ${e.agent_id}: ${e.error_type || 'error'} (${(e.error_message || '').toString().slice(0, 140)})`);
+        content += `\n\nSome providers failed:\n${lines.join('\n')}`;
       }
 
       const resources = data.responses?.map((res: any) => ({
@@ -172,13 +221,15 @@ export default function DashboardPerplexity() {
   };
 
   // Prevent hydration errors by only rendering after mount
-  if (!mounted) {
+  if (!mounted || authLoading) {
     return (
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', bgcolor: '#070B14' }}>
         <CircularProgress />
       </Box>
     );
   }
+
+  // No redirect in guest mode
 
   return (
     <ThemeProvider theme={theme}>
@@ -232,7 +283,9 @@ export default function DashboardPerplexity() {
             </Tooltip>
             <Tooltip title="Account" placement="right">
               <IconButton size="small" onClick={(e) => setAnchorEl(e.currentTarget)}>
-                <Avatar sx={{ width: 24, height: 24, bgcolor: '#00E5FF' }}>R</Avatar>
+                <Avatar sx={{ width: 24, height: 24, bgcolor: '#00E5FF' }}>
+                  {(user?.full_name?.[0] || user?.email?.[0] || 'U').toUpperCase()}
+                </Avatar>
               </IconButton>
             </Tooltip>
           </Stack>
@@ -244,7 +297,13 @@ export default function DashboardPerplexity() {
               <SettingsIcon sx={{ mr: 1 }} /> Settings
             </MenuItem>
             <Divider />
-            <MenuItem>
+            <MenuItem
+              onClick={() => {
+                setAnchorEl(null);
+                logout();
+                router.push('/login');
+              }}
+            >
               <LogoutIcon sx={{ mr: 1 }} /> Logout
             </MenuItem>
           </Menu>
@@ -388,23 +447,32 @@ export default function DashboardPerplexity() {
                     sx={{ borderRadius: 2 }}
                   />
                 </Tooltip>
-                {MODELS.map((m) => (
-                  <Tooltip key={m.id} title={`${m.name} (${m.provider})`} placement="top">
-                    <Chip
-                      label={`${m.icon} ${m.name}`}
-                      variant={selectedModels.includes(m.id) ? 'filled' : 'outlined'}
-                      color={selectedModels.includes(m.id) ? 'primary' : 'default'}
-                      onClick={() => {
-                        setSelectedModels((prev) =>
-                          prev.includes(m.id) ? prev.filter((x) => x !== m.id) : [...prev, m.id]
-                        );
-                      }}
-                      onMouseEnter={(e) => setModelHover({ anchor: e.currentTarget, id: m.id })}
-                      onMouseLeave={() => setModelHover({ anchor: null, id: null })}
-                      sx={{ borderRadius: 2 }}
-                    />
-                  </Tooltip>
-                ))}
+                {MODELS.filter((m) => providers?.[m.id]?.initialized ?? true).map((m) => {
+                  const initialized = providers?.[m.id]?.initialized ?? true;
+                  const title = initialized
+                    ? `${m.name} (${m.provider})`
+                    : `${m.name} (${m.provider}) — not available on server`;
+
+                  return (
+                    <Tooltip key={m.id} title={title} placement="top">
+                      <Chip
+                        label={`${m.icon} ${m.name}`}
+                        variant={selectedModels.includes(m.id) ? 'filled' : 'outlined'}
+                        color={selectedModels.includes(m.id) ? 'primary' : 'default'}
+                        disabled={!initialized}
+                        onClick={() => {
+                          if (!initialized) return;
+                          setSelectedModels((prev) =>
+                            prev.includes(m.id) ? prev.filter((x) => x !== m.id) : [...prev, m.id]
+                          );
+                        }}
+                        onMouseEnter={(e) => setModelHover({ anchor: e.currentTarget, id: m.id })}
+                        onMouseLeave={() => setModelHover({ anchor: null, id: null })}
+                        sx={{ borderRadius: 2 }}
+                      />
+                    </Tooltip>
+                  );
+                })}
                 <Box sx={{ width: 12 }} />
                 <Tooltip title="Focus mode" placement="top">
                   <Chip

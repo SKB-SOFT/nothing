@@ -14,6 +14,29 @@ pnpm dev
 bun dev
 ```
 
+### Troubleshooting (Windows): Turbopack / out-of-memory
+
+If you see errors like:
+
+- `The paging file is too small for this operation to complete` (Windows error 1455)
+- `FATAL ERROR: ... JavaScript heap out of memory`
+
+Try:
+
+-- Use the non-Turbopack dev server (lower memory usage):
+
+	```bash
+	npm run dev
+	```
+
+-- Or opt into Turbopack if your machine has enough RAM/pagefile:
+
+	```bash
+	npm run dev:turbo
+	```
+
+If the paging-file error persists, increase your Windows Virtual Memory (page file) size and reboot.
+
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.

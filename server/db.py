@@ -1,11 +1,12 @@
 import os
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import Column, Integer, String, Text, Float, DateTime, Boolean, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, Float, DateTime, Boolean, ForeignKey, UniqueConstraint
 from sqlalchemy.sql import func
 from dotenv import load_dotenv
 
-load_dotenv()
+_ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+load_dotenv(_ENV_PATH)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./app.db")
 
@@ -65,9 +66,13 @@ class Response(Base):
 
 class Cache(Base):
     __tablename__ = "cache"
+
+    __table_args__ = (
+        UniqueConstraint("query_hash", "agent_id", name="uq_cache_queryhash_agent"),
+    )
     
     cache_id = Column(Integer, primary_key=True, autoincrement=True)
-    query_hash = Column(String, unique=True, nullable=False, index=True)
+    query_hash = Column(String, nullable=False, index=True)
     agent_id = Column(String, nullable=False, index=True)
     response_text = Column(Text)
     created_timestamp = Column(DateTime, default=func.now())

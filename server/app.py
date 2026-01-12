@@ -9,13 +9,25 @@ import os
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from db import AsyncSessionLocal, User, Query, Response, Cache, init_db
-from orchestrator_v2 import orchestrate_query, PROVIDER_CONFIGS
+
+try:
+    # When imported as a package module (recommended): `uvicorn server.main:app`
+    from .db import AsyncSessionLocal, User, Query, Response, Cache, init_db  # type: ignore
+    from .orchestrator_v2 import (  # type: ignore
+        orchestrate_query,
+        PROVIDER_CONFIGS,
+        get_provider_info,
+    )
+except Exception:
+    # When running from within the `server/` directory: `uvicorn main:app`
+    from db import AsyncSessionLocal, User, Query, Response, Cache, init_db  # type: ignore
+    from orchestrator_v2 import orchestrate_query, PROVIDER_CONFIGS, get_provider_info  # type: ignore
 from dotenv import load_dotenv
 import asyncio
 from contextlib import asynccontextmanager
 
-load_dotenv()
+_ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+load_dotenv(_ENV_PATH)
 
 # Initialize database with lifespan
 @asynccontextmanager
@@ -63,7 +75,8 @@ class UserLogin(BaseModel):
 
 class QueryRequest(BaseModel):
     query_text: str
-    selected_agents: List[str] = ["hf-gptj", "hf-falcon"]
+    # Defaults must exist in PROVIDER_CONFIGS (orchestrator_v2)
+    selected_agents: List[str] = ["groq", "gemini", "mistral", "cerebras", "cohere", "huggingface"]
 
 # ==================== DEPENDENCIES ====================
 
@@ -110,6 +123,53 @@ async def get_current_user(
         return user
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+
+async def get_optional_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: AsyncSession = Depends(get_db)
+):
+    """Return a user when a valid Bearer token is present; otherwise None.
+
+    This enables a temporary "guest mode" where the app can be used without login.
+    """
+    if credentials is None:
+        return None
+
+    try:
+        token = credentials.credentials
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if not email:
+            return None
+
+        result = await db.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+        return user
+    except Exception:
+        return None
+
+
+async def get_or_create_guest_user(db: AsyncSession) -> User:
+    """Ensure a stable guest user exists for unauthenticated usage."""
+    guest_email = os.getenv("GUEST_EMAIL", "guest@local")
+    result = await db.execute(select(User).where(User.email == guest_email))
+    existing = result.scalar_one_or_none()
+    if existing:
+        return existing
+
+    # password is irrelevant for guest mode; still required by schema
+    guest = User(
+        email=guest_email,
+        password_hash=get_password_hash(os.getenv("GUEST_PASSWORD", "guest")),
+        full_name=os.getenv("GUEST_FULL_NAME", "Guest"),
+        quota_daily=int(os.getenv("GUEST_QUOTA_DAILY", "1000000")),
+        is_admin=False,
+    )
+    db.add(guest)
+    await db.commit()
+    await db.refresh(guest)
+    return guest
 
 # ==================== AUTH ENDPOINTS ====================
 
@@ -177,15 +237,25 @@ async def get_me(current_user: User = Depends(get_current_user)):
         }
     }
 
+
+@app.get("/api/providers")
+async def list_providers():
+    """Return provider initialization status and defaults."""
+    return {"providers": get_provider_info()}
+
 # ==================== QUERY ENDPOINTS ====================
 
 @app.post("/api/query")
 async def submit_query(
     query_data: QueryRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Submit query to multiple AI agents"""
+
+    user = current_user
+    if user is None:
+        user = await get_or_create_guest_user(db)
     
     # Validation
     if len(query_data.query_text.strip()) < 5:
@@ -199,13 +269,13 @@ async def submit_query(
     
     result = await db.execute(
         select(func.count(Query.query_id)).where(
-            (Query.user_id == current_user.user_id) &
+            (Query.user_id == user.user_id) &
             (Query.query_timestamp >= today_start)
         )
     )
     today_count = result.scalar() or 0
     
-    if today_count >= current_user.quota_daily:
+    if today_count >= user.quota_daily:
         raise HTTPException(status_code=429, detail="Daily quota exceeded")
     
     # Validate agents
@@ -215,7 +285,7 @@ async def submit_query(
     
     # Create query record
     new_query = Query(
-        user_id=current_user.user_id,
+        user_id=user.user_id,
         query_text=query_data.query_text,
         query_type="general"
     )
@@ -254,15 +324,32 @@ async def submit_query(
         }
         for provider_id, response_data in orch_result["responses"].items()
     ]
+
+    success = [r for r in responses_list if r.get("status") == "success"]
+    groq_success = next((r for r in success if r.get("agent_id") == "groq"), None)
+    best = groq_success or (success[0] if success else None)
+    final_answer = best.get("response_text") if best else "No provider succeeded. Try again."
+
+    errors = [
+        {
+            "agent_id": r.get("agent_id"),
+            "error_type": r.get("error_type"),
+            "error_message": r.get("error_message"),
+        }
+        for r in responses_list
+        if r.get("status") == "error"
+    ]
     
     return {
         "query_id": new_query.query_id,
         "query_text": new_query.query_text,
         "timestamp": new_query.query_timestamp.isoformat(),
+        "final_answer": final_answer,
+        "errors": errors,
         "responses": responses_list,
         "metadata": {
             **orch_result.get("metadata", {}),
-            "queries_remaining": max(0, current_user.quota_daily - today_count - 1),
+            "queries_remaining": max(0, user.quota_daily - today_count - 1),
         }
     }
 

@@ -14,7 +14,7 @@ class CohereProvider(BaseProvider):
     Docs: https://docs.cohere.com/reference/generate
     """
     
-    def __init__(self, api_key: str, model_name: str = "command-r-plus"):
+    def __init__(self, api_key: str, model_name: str = "command-r"):
         super().__init__(api_key, model_name)
         self.base_url = "https://api.cohere.ai/v1/chat"
     
@@ -67,6 +67,13 @@ class CohereProvider(BaseProvider):
                         )
                     else:
                         error_text = await response.text()
+
+                        # Some Cohere accounts no longer support certain legacy model IDs.
+                        # If the requested model is unavailable, fall back to a more common one.
+                        if response.status == 404 and self.model_name != "command-r":
+                            self.model_name = "command-r"
+                            return await self.query(prompt, timeout=timeout)
+
                         return self.format_error(
                             error_message=f"HTTP {response.status}: {error_text[:100]}",
                             response_time_ms=response_time_ms
@@ -102,7 +109,7 @@ class CohereProvider(BaseProvider):
         Return list of available Cohere models.
         """
         return [
-            "command-r-plus",  # Most capable, can generate, summarize, analyze
-            "command-r",       # More efficient, still powerful
+            "command-r",       # Strong default
+            "command-r-plus",  # May require specific access
             "command-light",   # Faster, lighter
         ]

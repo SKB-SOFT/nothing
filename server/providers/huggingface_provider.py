@@ -18,7 +18,9 @@ class HuggingFaceProvider(BaseProvider):
     def __init__(self, api_key: str, model_id: str = "HuggingFaceH4/zephyr-7b-beta"):
         super().__init__(api_key, model_id)
         self.model_id = model_id
-        self.base_url = f"https://api-inference.huggingface.co/models/{model_id}"
+        # HuggingFace deprecated api-inference.huggingface.co in favor of router.huggingface.co
+        # See error 410 guidance returned by the API.
+        self.base_url = f"https://router.huggingface.co/hf-inference/models/{model_id}"
     
     async def query(self, prompt: str, timeout: int = 30) -> Dict[str, Any]:
         """

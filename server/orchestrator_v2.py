@@ -2,20 +2,118 @@ import hashlib
 import time
 import asyncio
 from typing import List, Dict, Any
-from providers import (
-    GroqProvider,
-    GeminiProvider,
-    MistralProvider,
-    CerebrasProvider,
-    CohereProvider,
-    HuggingFaceProvider,
-)
+
+try:
+    # When imported as a package module (recommended): `server.orchestrator_v2`
+    from .providers import (  # type: ignore
+        GroqProvider,
+        GeminiProvider,
+        MistralProvider,
+        CerebrasProvider,
+        CohereProvider,
+        HuggingFaceProvider,
+    )
+except Exception:
+    # When running from within the `server/` directory
+    from providers import (  # type: ignore
+        GroqProvider,
+        GeminiProvider,
+        MistralProvider,
+        CerebrasProvider,
+        CohereProvider,
+        HuggingFaceProvider,
+    )
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+_ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+load_dotenv(_ENV_PATH)
+
+# ==================== STABILITY SETTINGS ====================
+
+# In-memory circuit breaker state (per-process)
+PROVIDER_STATE: Dict[str, Dict[str, float]] = {}
+CIRCUIT_FAILS = 3
+COOLDOWN_SECONDS = 120
+
+RETRYABLE_ERROR_TYPES = {"timeout", "rate_limited", "provider_down"}
+
+
+async def _query_with_retries(
+    provider_id: str,
+    prompt: str,
+    timeout: int,
+    max_retries: int = 2,
+) -> Dict[str, Any]:
+    provider = PROVIDERS[provider_id]
+
+    # circuit breaker check
+    state = PROVIDER_STATE.get(provider_id, {"fail_count": 0.0, "cooldown_until": 0.0})
+    now = time.time()
+    if state.get("cooldown_until", 0.0) > now:
+        return {
+            "status": "error",
+            "error_type": "provider_down",
+            "error_message": f"Provider in cooldown until {state['cooldown_until']:.0f}",
+            "response_time_ms": 0,
+            "cached": False,
+            "model_used": getattr(provider, "model_name", ""),
+            "provider": provider.__class__.__name__,
+            "attempt": 0,
+        }
+
+    attempt = 0
+    backoff_s = 0.6
+    last: Dict[str, Any] | None = None
+
+    while attempt <= max_retries:
+        attempt += 1
+        result = await provider.query(prompt, timeout=timeout)
+
+        if result.get("status") == "success":
+            PROVIDER_STATE[provider_id] = {"fail_count": 0.0, "cooldown_until": 0.0}
+            result["attempt"] = attempt
+            return result
+
+        last = result
+        err_type = result.get("error_type", "unknown")
+        if err_type not in RETRYABLE_ERROR_TYPES or attempt > max_retries:
+            break
+
+        # Respect retry_after_ms when provided
+        retry_after_ms = result.get("retry_after_ms")
+        if isinstance(retry_after_ms, int) and retry_after_ms > 0:
+            await asyncio.sleep(retry_after_ms / 1000)
+        else:
+            await asyncio.sleep(backoff_s)
+            backoff_s *= 2
+
+    # update breaker
+    state = PROVIDER_STATE.get(provider_id, {"fail_count": 0.0, "cooldown_until": 0.0})
+    state["fail_count"] = float(state.get("fail_count", 0.0)) + 1.0
+    if state["fail_count"] >= CIRCUIT_FAILS:
+        state["cooldown_until"] = time.time() + COOLDOWN_SECONDS
+    PROVIDER_STATE[provider_id] = state
+
+    if last is None:
+        last = {
+            "status": "error",
+            "error_type": "unknown",
+            "error_message": "Unknown failure",
+            "response_time_ms": 0,
+        }
+
+    last["attempt"] = attempt
+    return last
 
 # ==================== PROVIDER REGISTRY ====================
+
+# Optional allow-list to control which providers are active in production.
+# Example: ENABLED_PROVIDERS=groq,gemini,mistral
+_enabled_env = (os.getenv("ENABLED_PROVIDERS") or "").strip()
+ENABLED_PROVIDERS = {p.strip() for p in _enabled_env.split(",") if p.strip()} or None
+PROVIDER_INIT_ERRORS: Dict[str, str] = {}
+PROVIDER_MISSING_KEYS: set[str] = set()
 
 PROVIDER_CONFIGS = {
     "groq": {
@@ -29,7 +127,7 @@ PROVIDER_CONFIGS = {
     "gemini": {
         "class": GeminiProvider,
         "api_key_env": "GEMINI_API_KEY",
-        "default_model": "gemini-pro",
+        "default_model": "gemini-1.5-flash",
         "name": "Google Gemini",
         "tier": "free",
         "quota": "60 req/min, 15K tokens/day",
@@ -53,7 +151,7 @@ PROVIDER_CONFIGS = {
     "cohere": {
         "class": CohereProvider,
         "api_key_env": "COHERE_API_KEY",
-        "default_model": "command-r-plus",
+        "default_model": "command-r",
         "name": "Cohere",
         "tier": "free",
         "quota": "1K requests/month + $1 credits",
@@ -71,6 +169,8 @@ PROVIDER_CONFIGS = {
 # Initialize providers from environment
 PROVIDERS = {}
 for provider_id, config in PROVIDER_CONFIGS.items():
+    if ENABLED_PROVIDERS is not None and provider_id not in ENABLED_PROVIDERS:
+        continue
     api_key = os.getenv(config["api_key_env"])
     if api_key:
         try:
@@ -86,7 +186,10 @@ for provider_id, config in PROVIDER_CONFIGS.items():
                     model_name=config["default_model"]
                 )
         except Exception as e:
+            PROVIDER_INIT_ERRORS[provider_id] = str(e)
             print(f"Warning: Failed to initialize {provider_id}: {e}")
+    else:
+        PROVIDER_MISSING_KEYS.add(provider_id)
 
 # ==================== UTILITY FUNCTIONS ====================
 
@@ -193,13 +296,17 @@ async def orchestrate_query(
     """
     
     query_hash = generate_query_hash(query_text, provider_ids)
-    cached_responses = {}
-    uncached_providers = []
+    requested_providers = list(provider_ids)
+    cached_responses: Dict[str, Dict[str, Any]] = {}
+    uncached_providers: List[str] = []
     
     # Check cache if DB available
     if db:
         from sqlalchemy import select
-        from db import Cache
+        try:
+            from .db import Cache  # type: ignore
+        except ImportError:
+            from db import Cache  # type: ignore
         
         for provider_id in provider_ids:
             try:
@@ -224,48 +331,69 @@ async def orchestrate_query(
     else:
         uncached_providers = provider_ids
     
-    # Query uncached providers in parallel
-    tasks = []
-    valid_providers = []
-    
-    for provider_id in uncached_providers:
-        if provider_id not in PROVIDERS:
-            print(f"Warning: Provider '{provider_id}' not found or not initialized")
-            continue
-        
-        valid_providers.append(provider_id)
-        tasks.append(PROVIDERS[provider_id].query(query_text, timeout=timeout))
-    
-    # Execute all queries in parallel
-    new_responses = {}
+    available_providers = [pid for pid in provider_ids if pid in PROVIDERS]
+    skipped_uninitialized = [pid for pid in provider_ids if pid not in PROVIDERS]
+
+    # Only run uncached among the available
+    to_run = [pid for pid in uncached_providers if pid in PROVIDERS]
+
+    # IMPORTANT: enforce a hard deadline per provider so a single slow provider
+    # (or retry/backoff logic) can't hang the entire request.
+    tasks = [
+        asyncio.wait_for(
+            _query_with_retries(pid, query_text, timeout=timeout, max_retries=2),
+            timeout=timeout,
+        )
+        for pid in to_run
+    ]
+
+    new_responses: Dict[str, Dict[str, Any]] = {}
     if tasks:
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        for provider_id, result in zip(valid_providers, results):
+
+        for provider_id, result in zip(to_run, results):
+            if isinstance(result, asyncio.TimeoutError):
+                new_responses[provider_id] = {
+                    "status": "error",
+                    "error_type": "timeout",
+                    "error_message": f"Timed out after {timeout}s",
+                    "cached": False,
+                    "response_time_ms": float(timeout) * 1000.0,
+                }
+                continue
+
             if isinstance(result, Exception):
                 new_responses[provider_id] = {
                     "status": "error",
-                    "error_message": str(result),
+                    "error_type": "unknown",
+                    "error_message": str(result)[:200],
                     "cached": False,
+                    "response_time_ms": 0,
                 }
-            else:
-                new_responses[provider_id] = {
-                    **result,
-                    "cached": False,
-                }
-                
-                # Cache successful responses
-                if db and result["status"] == "success":
+                continue
+
+            new_responses[provider_id] = {**result, "cached": False}
+
+            # Cache successful responses
+            if db and result.get("status") == "success":
+                try:
                     try:
-                        from db import Cache
-                        cache_entry = Cache(
-                            query_hash=query_hash,
-                            agent_id=provider_id,
-                            response_text=result["response_text"],
-                        )
-                        db.add(cache_entry)
-                    except Exception as e:
-                        print(f"Warning: Failed to cache {provider_id}: {e}")
+                        from .db import Cache  # type: ignore
+                    except ImportError:
+                        from db import Cache  # type: ignore
+                    db.add(Cache(query_hash=query_hash, agent_id=provider_id, response_text=result["response_text"]))
+                except Exception as e:
+                    print(f"Warning: Failed to cache {provider_id}: {e}")
+
+    # Add explicit responses for requested but uninitialized providers
+    for pid in skipped_uninitialized:
+        new_responses[pid] = {
+            "status": "error",
+            "error_type": "not_initialized",
+            "error_message": "Provider not initialized (missing API key?)",
+            "cached": False,
+            "response_time_ms": 0,
+        }
     
     # Commit cache to DB
     if db:
@@ -281,7 +409,7 @@ async def orchestrate_query(
     synthesis = ResponseSynthesizer.aggregate_responses(all_responses)
     
     # Calculate metadata
-    successful = [r for r in all_responses.values() if r["status"] == "success"]
+    successful = [r for r in all_responses.values() if r.get("status") == "success"]
     response_times = [r.get("response_time_ms", 0) for r in successful if not r.get("cached", False)]
     avg_response_time = sum(response_times) / len(response_times) if response_times else 0
     
@@ -289,7 +417,11 @@ async def orchestrate_query(
         "responses": all_responses,
         "synthesis": synthesis,
         "metadata": {
-            "total_providers": len(provider_ids),
+            "requested_providers": requested_providers,
+            "available_providers": available_providers,
+            "skipped_uninitialized": skipped_uninitialized,
+            "total_requested": len(requested_providers),
+            "total_available": len(available_providers),
             "successful": len(successful),
             "failed": len(all_responses) - len(successful),
             "avg_response_time_ms": avg_response_time,
@@ -323,12 +455,30 @@ def get_provider_info() -> Dict[str, Dict[str, Any]]:
     """
     info = {}
     for provider_id, config in PROVIDER_CONFIGS.items():
+        enabled = ENABLED_PROVIDERS is None or provider_id in ENABLED_PROVIDERS
         is_initialized = provider_id in PROVIDERS
+        init_error = PROVIDER_INIT_ERRORS.get(provider_id)
+        missing_key = provider_id in PROVIDER_MISSING_KEYS
+
+        if not enabled:
+            status_reason = "disabled_by_config"
+        elif is_initialized:
+            status_reason = "ready"
+        elif init_error:
+            status_reason = "init_failed"
+        elif missing_key:
+            status_reason = "missing_api_key"
+        else:
+            status_reason = "not_initialized"
+
         info[provider_id] = {
             "name": config["name"],
             "tier": config["tier"],
             "quota": config["quota"],
+            "enabled": enabled,
             "initialized": is_initialized,
             "default_model": config["default_model"],
+            "status": status_reason,
+            "error": init_error,
         }
     return info

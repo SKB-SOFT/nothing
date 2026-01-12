@@ -73,6 +73,12 @@ class CerebrasProvider(BaseProvider):
                         )
                     else:
                         error_text = await response.text()
+
+                        # If the configured model isn't available for this key/account, retry once with a smaller model.
+                        if response.status == 404 and self.model_name != "llama-3.1-8b":
+                            self.model_name = "llama-3.1-8b"
+                            return await self.query(prompt, timeout=timeout)
+
                         return self.format_error(
                             error_message=f"HTTP {response.status}: {error_text[:100]}",
                             response_time_ms=response_time_ms

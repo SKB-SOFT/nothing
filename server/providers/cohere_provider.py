@@ -49,35 +49,45 @@ class CohereProvider(BaseProvider):
                     
                     if response.status == 200:
                         data = await response.json()
-                        response_text = data["text"]
-                        
-                        # Extract sources if available (from citations)
+                        # Try common Cohere chat response shapes
+                        response_text = ""
+                        if isinstance(data, dict):
+                            # Some responses: {"text": "..."}
+                            if isinstance(data.get("text"), str):
+                                response_text = data["text"]
+                            # Some chat responses: {"message": {"content": [{"type":"text","text":"..."}]}}
+                            if not response_text and isinstance(data.get("message"), dict):
+                                msg = data["message"]
+                                content = msg.get("content")
+                                if isinstance(content, list):
+                                    chunks = []
+                                    for item in content:
+                                        if isinstance(item, dict) and isinstance(item.get("text"), str):
+                                            chunks.append(item["text"])
+                                    response_text = "".join(chunks).strip()
+                            # Some responses: {"response": "..."} (defensive)
+                            if not response_text and isinstance(data.get("response"), str):
+                                response_text = data["response"]
+                        if not response_text:
+                            response_text = str(data)[:500]
                         sources = []
-                        if "citations" in data:
+                        if isinstance(data, dict) and isinstance(data.get("citations"), list):
                             sources = data["citations"]
-                        
-                        # Get token count estimate
-                        token_count = len(response_text.split())  # Rough estimate
-                        
+                        token_count = len(response_text.split())
                         return self.format_response(
                             response_text=response_text,
                             response_time_ms=response_time_ms,
                             token_count=token_count,
                             sources=sources
                         )
-                    else:
-                        error_text = await response.text()
-
-                        # Some Cohere accounts no longer support certain legacy model IDs.
-                        # If the requested model is unavailable, fall back to a more common one.
-                        if response.status == 404 and self.model_name != "command-r":
-                            self.model_name = "command-r"
-                            return await self.query(prompt, timeout=timeout)
-
-                        return self.format_error(
-                            error_message=f"HTTP {response.status}: {error_text[:100]}",
-                            response_time_ms=response_time_ms
-                        )
+                    # Non-200 error
+                    error_text = await response.text()
+                    error_type = "model_not_found" if response.status == 404 else ("rate_limited" if response.status == 429 else ("auth_error" if response.status in (401, 403) else "unknown"))
+                    return self.format_error(
+                        error_message=f"HTTP {response.status}: {error_text[:200]}",
+                        response_time_ms=response_time_ms,
+                        error_type=error_type,
+                    )
         
         except asyncio.TimeoutError:
             response_time_ms = (time.time() - start_time) * 1000

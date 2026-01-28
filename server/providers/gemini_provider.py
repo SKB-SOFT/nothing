@@ -20,8 +20,14 @@ def _classify_http(status: int) -> str:
     return "unknown"
 
 
+
 class GeminiProvider(BaseProvider):
     """Google Gemini API Provider with v1/v1beta fallback."""
+    MODEL_FALLBACKS = [
+        "gemini-2.0-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-pro",
+    ]
 
     def __init__(self, api_key: str, model_name: str = "gemini-1.5-flash"):
         super().__init__(api_key, model_name)
@@ -127,7 +133,29 @@ class GeminiProvider(BaseProvider):
                         last_error = ("timeout", f"Timeout on {url}")
                         continue
 
-                # Both versions failed.
+                # Both versions failed for the primary model. If it was 404, try fallback models.
+                if last_error and last_error[0] == 404:
+                    for m in self.MODEL_FALLBACKS:
+                        for url in (
+                            f"https://generativelanguage.googleapis.com/v1/models/{m}:generateContent",
+                            f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent",
+                        ):
+                            try:
+                                resp = await self._post(session, url, payload, timeout)
+                                response_time_ms = (time.time() - start_time) * 1000
+                                if resp.status == 200:
+                                    data = await resp.json()
+                                    response_text, sources = self._extract_text_and_sources(data)
+                                    usage = data.get("usageMetadata") or {}
+                                    token_count = usage.get("promptTokenCount", 0) + usage.get("candidatesTokenCount", 0)
+                                    return self.format_response(
+                                        response_text=response_text or "No response generated",
+                                        response_time_ms=response_time_ms,
+                                        token_count=token_count if token_count > 0 else len((response_text or "").split()),
+                                        sources=sources,
+                                    )
+                            except Exception:
+                                continue
                 status, msg = last_error if last_error else (500, "Unknown error")
                 return self.format_error(
                     error_message=f"HTTP {status}: {msg}",

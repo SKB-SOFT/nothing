@@ -10,18 +10,20 @@ from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
+
 try:
     # When imported as a package module (recommended): `uvicorn server.main:app`
     from .db import AsyncSessionLocal, User, Query, Response, Cache, init_db  # type: ignore
-    from .orchestrator_v2 import (  # type: ignore
+    from .orchestrator_v2 import (
         orchestrate_query,
         PROVIDER_CONFIGS,
         get_provider_info,
     )
-except Exception:
-    # When running from within the `server/` directory: `uvicorn main:app`
-    from db import AsyncSessionLocal, User, Query, Response, Cache, init_db  # type: ignore
-    from orchestrator_v2 import orchestrate_query, PROVIDER_CONFIGS, get_provider_info  # type: ignore
+except ImportError:
+    # When running from project root or as server.db
+    from server.db import AsyncSessionLocal, User, Query, Response, Cache, init_db  # type: ignore
+    from server.orchestrator_v2 import orchestrate_query, PROVIDER_CONFIGS, get_provider_info  # type: ignore
+
 from dotenv import load_dotenv
 import asyncio
 from contextlib import asynccontextmanager
@@ -108,14 +110,14 @@ async def get_current_user(
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     try:
         token = credentials.credentials
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email: str = payload.get("sub")
         if email is None:
             raise HTTPException(status_code=401, detail="Invalid token")
-        
+
         result = await db.execute(select(User).where(User.email == email))
         user = result.scalar_one_or_none()
         if user is None:
@@ -178,10 +180,10 @@ async def register(user_data: UserRegister, db: AsyncSession = Depends(get_db)):
     """Register a new user"""
     result = await db.execute(select(User).where(User.email == user_data.email))
     existing = result.scalar_one_or_none()
-    
+
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
-    
+
     new_user = User(
         email=user_data.email,
         password_hash=get_password_hash(user_data.password),
@@ -190,7 +192,7 @@ async def register(user_data: UserRegister, db: AsyncSession = Depends(get_db)):
     db.add(new_user)
     await db.commit()
     await db.refresh(new_user)
-    
+
     access_token = create_access_token(data={"sub": new_user.email})
     return {
         "access_token": access_token,
@@ -208,10 +210,10 @@ async def login(user_data: UserLogin, db: AsyncSession = Depends(get_db)):
     """Login user and return JWT token"""
     result = await db.execute(select(User).where(User.email == user_data.email))
     user = result.scalar_one_or_none()
-    
+
     if not user or not verify_password(user_data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    
+
     access_token = create_access_token(data={"sub": user.email})
     return {
         "access_token": access_token,
@@ -256,17 +258,17 @@ async def submit_query(
     user = current_user
     if user is None:
         user = await get_or_create_guest_user(db)
-    
+
     # Validation
     if len(query_data.query_text.strip()) < 5:
         raise HTTPException(status_code=400, detail="Query too short (min 5 chars)")
     if len(query_data.query_text) > 5000:
         raise HTTPException(status_code=400, detail="Query too long (max 5000 chars)")
-    
+
     # Check daily quota
     today = datetime.now(timezone.utc).date()
     today_start = datetime.combine(today, datetime.min.time()).replace(tzinfo=timezone.utc)
-    
+
     result = await db.execute(
         select(func.count(Query.query_id)).where(
             (Query.user_id == user.user_id) &
@@ -274,15 +276,15 @@ async def submit_query(
         )
     )
     today_count = result.scalar() or 0
-    
+
     if today_count >= user.quota_daily:
         raise HTTPException(status_code=429, detail="Daily quota exceeded")
-    
+
     # Validate agents
     for agent_id in query_data.selected_agents:
         if agent_id not in PROVIDER_CONFIGS:
             raise HTTPException(status_code=400, detail=f"Unknown agent: {agent_id}")
-    
+
     # Create query record
     new_query = Query(
         user_id=user.user_id,
@@ -291,7 +293,7 @@ async def submit_query(
     )
     db.add(new_query)
     await db.flush()
-    
+
     # Orchestrate AI calls
     orch_result = await orchestrate_query(
         user.user_id,
@@ -299,7 +301,7 @@ async def submit_query(
         query_data.selected_agents,
         db
     )
-    
+
     # Store responses - orchestrator_v2 returns dict keyed by provider_id
     for provider_id, response_data in orch_result["responses"].items():
         db_response = Response(
@@ -312,10 +314,10 @@ async def submit_query(
             error_message=response_data.get("error_message"),
         )
         db.add(db_response)
-    
+
     await db.commit()
     await db.refresh(new_query)
-    
+
     # Transform responses dict to list format for frontend
     responses_list = [
         {
@@ -326,10 +328,8 @@ async def submit_query(
         for provider_id, response_data in orch_result["responses"].items()
     ]
 
-    success = [r for r in responses_list if r.get("status") == "success"]
-    groq_success = next((r for r in success if r.get("agent_id") == "groq"), None)
-    best = groq_success or (success[0] if success else None)
-    final_answer = best.get("response_text") if best else "No provider succeeded. Try again."
+    # ✅ IMPORTANT: use orchestrator's final answer (already Groq-preferred synthesis)
+    final_answer = orch_result.get("final_answer") or "No provider succeeded. Try again."  # <-- changed
 
     errors = [
         {
@@ -340,7 +340,7 @@ async def submit_query(
         for r in responses_list
         if r.get("status") == "error"
     ]
-    
+
     return {
         "query_id": new_query.query_id,
         "query_text": new_query.query_text,
@@ -370,21 +370,21 @@ async def get_user_queries(
         .offset(offset)
     )
     queries = result.scalars().all()
-    
+
     queries_data = []
     for q in queries:
         result = await db.execute(
             select(Response).where(Response.query_id == q.query_id)
         )
         responses = result.scalars().all()
-        
+
         queries_data.append({
             "query_id": q.query_id,
             "query_text": q.query_text[:100],  # Truncate for list view
             "timestamp": q.query_timestamp.isoformat(),
             "response_count": len(responses),
         })
-    
+
     return {"queries": queries_data}
 
 @app.get("/api/query/{query_id}")
@@ -400,15 +400,15 @@ async def get_query_details(
         )
     )
     query = result.scalar_one_or_none()
-    
+
     if not query:
         raise HTTPException(status_code=404, detail="Query not found")
-    
+
     result = await db.execute(
         select(Response).where(Response.query_id == query_id)
     )
     responses = result.scalars().all()
-    
+
     return {
         "query_id": query.query_id,
         "query_text": query.query_text,
@@ -440,19 +440,19 @@ async def get_all_users(
     """Get all users (admin only)"""
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
-    
+
     result = await db.execute(
         select(User).limit(limit).offset(offset)
     )
     users = result.scalars().all()
-    
+
     users_data = []
     for user in users:
         result = await db.execute(
             select(func.count(Query.query_id)).where(Query.user_id == user.user_id)
         )
         query_count = result.scalar() or 0
-        
+
         users_data.append({
             "user_id": user.user_id,
             "email": user.email,
@@ -462,7 +462,7 @@ async def get_all_users(
             "quota_daily": user.quota_daily,
             "is_admin": user.is_admin,
         })
-    
+
     return {"users": users_data}
 
 @app.get("/api/admin/metrics")
@@ -473,18 +473,18 @@ async def get_metrics(
     """Get system metrics (admin only)"""
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
-    
+
     total_users = await db.execute(select(func.count(User.user_id)))
     total_users = total_users.scalar() or 0
-    
+
     total_queries = await db.execute(select(func.count(Query.query_id)))
     total_queries = total_queries.scalar() or 0
-    
+
     result = await db.execute(
         select(func.avg(Response.response_time_ms))
     )
     avg_response_time = result.scalar() or 0
-    
+
     return {
         "total_users": total_users,
         "total_queries": total_queries,

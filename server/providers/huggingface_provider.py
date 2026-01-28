@@ -20,14 +20,15 @@ class HuggingFaceProvider(BaseProvider):
         self.model_id = model_id
         # HuggingFace deprecated api-inference.huggingface.co in favor of router.huggingface.co
         # See error 410 guidance returned by the API.
-        self.base_url = f"https://router.huggingface.co/hf-inference/models/{model_id}"
+        self.router_url = f"https://router.huggingface.co/hf-inference/models/{model_id}"
+        self.legacy_url = f"https://api-inference.huggingface.co/models/{model_id}"
     
     async def query(self, prompt: str, timeout: int = 30) -> Dict[str, Any]:
         """
         Query HuggingFace Inference API.
         """
         start_time = time.time()
-        
+
         # Different payload format for text-generation vs text2text-generation
         payload = {
             "inputs": prompt,
@@ -35,65 +36,56 @@ class HuggingFaceProvider(BaseProvider):
                 "max_length": 1024,
                 "max_new_tokens": 512,
                 "temperature": 0.7,
-                "top_p": 0.9,
-                "do_sample": True,
-                "return_full_text": False,  # Only return generated text, not prompt
-            },
-            "options": {
-                "wait_for_model": True,  # Wait if model is loading
             }
         }
-        
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        
+
         try:
-            async with aiohttp.ClientSession() as session:
+            async def _attempt(url: str):
                 async with session.post(
-                    self.base_url,
+                    url,
                     json=payload,
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=timeout)
                 ) as response:
-                    response_time_ms = (time.time() - start_time) * 1000
-                    
-                    if response.status == 200:
-                        data = await response.json()
-                        response_text = ""
-                        
-                        # Handle different response formats
-                        if isinstance(data, list):
-                            # Text generation format: [{'generated_text': 'text'}]
-                            if len(data) > 0:
-                                if "generated_text" in data[0]:
-                                    response_text = data[0]["generated_text"]
-                                elif "summary_text" in data[0]:
-                                    response_text = data[0]["summary_text"]
-                        elif isinstance(data, dict):
-                            # Single object response
-                            if "generated_text" in data:
-                                response_text = data["generated_text"]
-                            elif "summary_text" in data:
-                                response_text = data["summary_text"]
-                        
-                        if not response_text:
-                            response_text = str(data)[:500]  # Fallback
-                        
-                        token_count = len(response_text.split())
-                        
-                        return self.format_response(
-                            response_text=response_text,
-                            response_time_ms=response_time_ms,
-                            token_count=token_count
-                        )
-                    else:
-                        error_text = await response.text()
-                        return self.format_error(
-                            error_message=f"HTTP {response.status}: {error_text[:100]}",
-                            response_time_ms=response_time_ms
-                        )
+                    return response, (time.time() - start_time) * 1000
+
+            async with aiohttp.ClientSession() as session:
+                response, response_time_ms = await _attempt(self.router_url)
+
+                # Router sometimes returns 404/410; retry once on legacy endpoint
+                if response.status in (404, 410):
+                    response, response_time_ms = await _attempt(self.legacy_url)
+
+                if response.status == 200:
+                    data = await response.json()
+                    response_text = ""
+                    # HuggingFace returns a list of generated texts
+                    if isinstance(data, list) and data and isinstance(data[0], dict):
+                        if "generated_text" in data[0]:
+                            response_text = data[0]["generated_text"]
+                        elif "summary_text" in data[0]:
+                            response_text = data[0]["summary_text"]
+                    elif isinstance(data, dict):
+                        if "generated_text" in data:
+                            response_text = data["generated_text"]
+                        elif "summary_text" in data:
+                            response_text = data["summary_text"]
+                    if not response_text:
+                        response_text = str(data)[:500]  # Fallback
+                    token_count = len(response_text.split())
+                    return self.format_response(
+                        response_text=response_text,
+                        response_time_ms=response_time_ms,
+                        token_count=token_count,
+                        sources=[]
+                    )
+                else:
+                    error_text = await response.text()
+                    return self.format_error(
+                        error_message=f"HTTP {response.status}: {error_text[:200]}",
+                        response_time_ms=response_time_ms,
+                        error_type="model_not_found" if response.status == 404 else "unknown",
+                    )
         
         except asyncio.TimeoutError:
             response_time_ms = (time.time() - start_time) * 1000

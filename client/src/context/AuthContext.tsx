@@ -1,7 +1,7 @@
 'use client'
 
 import React, { createContext, useContext, useState, useEffect } from 'react'
-import axios from 'axios'
+import { apiClient } from '@/lib/api'
 
 interface User {
   id: number
@@ -41,12 +41,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const validateToken = async (token: string) => {
     try {
-      const response = await axios.get(
-        `${process.env.NEXT_PUBLIC_API_URL}/api/auth/me`,
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      )
+      const response = await apiClient.get('/api/auth/me', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
       setUser(response.data.user)
     } catch (error) {
       localStorage.removeItem('token')
@@ -58,31 +55,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = async (email: string, password: string) => {
     try {
-      const response = await axios.post(
-        `${process.env.NEXT_PUBLIC_API_URL}/api/auth/login`,
-        { email, password }
-      )
+      const response = await apiClient.post('/api/auth/login', { email, password })
       const { access_token, user } = response.data
       localStorage.setItem('token', access_token)
       setToken(access_token)
       setUser(user)
     } catch (error: any) {
-      throw new Error(error.response?.data?.detail || 'Login failed')
+      throw new Error(error.response?.data?.detail || error.normalizedMessage || 'Login failed')
     }
   }
 
   const register = async (email: string, password: string, full_name: string) => {
     try {
-      const response = await axios.post(
-        `${process.env.NEXT_PUBLIC_API_URL}/api/auth/register`,
-        { email, password, full_name }
-      )
+      const response = await apiClient.post('/api/auth/register', { email, password, full_name })
       const { access_token, user } = response.data
       localStorage.setItem('token', access_token)
       setToken(access_token)
       setUser(user)
     } catch (error: any) {
-      throw new Error(error.response?.data?.detail || 'Registration failed')
+      throw new Error(error.response?.data?.detail || error.normalizedMessage || 'Registration failed')
     }
   }
 

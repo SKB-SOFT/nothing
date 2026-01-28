@@ -38,6 +38,10 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Never commit env files or secrets
+.env*
+.env.local
 .pnpm-debug.log*
 .npm
 .yarn

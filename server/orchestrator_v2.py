@@ -1,3 +1,97 @@
+from typing import List, Dict, Any
+# ---------- Synthesis helpers ----------
+def _pick_first_success_provider_id(responses: Dict[str, Dict[str, Any]]) -> str | None:
+    for pid, r in responses.items():
+        if r.get("status") == "success" and (r.get("response_text") or "").strip():
+            return pid
+    return None
+
+import hashlib
+import time
+import asyncio
+from typing import List, Dict, Any, Optional
+
+
+try:
+    # When imported as a package module (recommended): `server.orchestrator_v2`
+    from .providers import (
+        GroqProvider,
+        GeminiProvider,
+        MistralProvider,
+        CerebrasProvider,
+        CohereProvider,
+        HuggingFaceProvider,
+    )
+except ImportError:
+    try:
+        # When running from project root or as server.providers
+        from server.providers import (
+            GroqProvider,
+            GeminiProvider,
+            MistralProvider,
+            CerebrasProvider,
+            CohereProvider,
+            HuggingFaceProvider,
+        )
+    except ImportError:
+        from providers import (
+            GroqProvider,
+            GeminiProvider,
+            MistralProvider,
+            CerebrasProvider,
+            CohereProvider,
+            HuggingFaceProvider,
+        )
+
+import os
+from dotenv import load_dotenv
+
+_ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+load_dotenv(_ENV_PATH)
+
+# ==================== STABILITY SETTINGS ====================
+
+# In-memory circuit breaker state (per-process)
+PROVIDER_STATE: Dict[str, Dict[str, float]] = {}
+CIRCUIT_FAILS = int(os.getenv("CIRCUIT_FAILS", "3"))
+COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "120"))
+
+RETRYABLE_ERROR_TYPES = {"timeout", "rate_limited", "provider_down"}
+DEFAULT_MAX_RETRIES = int(os.getenv("PROVIDER_MAX_RETRIES", "2"))
+HARD_DEADLINE_BUFFER_S = int(os.getenv("HARD_DEADLINE_BUFFER_S", "10"))
+
+SYNTH_TIMEOUT_S = int(os.getenv("SYNTH_TIMEOUT_S", "30"))
+
+
+import hashlib
+import time
+import asyncio
+from typing import List, Dict, Any
+
+# ==================== SYNTHESIS HELPERS ====================
+def get_first_initialized_provider_id() -> str | None:
+    # PROVIDERS preserves insertion order in modern Python, and you build it in PROVIDER_CONFIGS order.
+    return next(iter(PROVIDERS.keys()), None)
+
+def build_synthesis_prompt(user_query: str, responses: Dict[str, Dict[str, Any]]) -> str:
+    successful = [(pid, r.get("response_text", "")) for pid, r in responses.items() if r.get("status") == "success"]
+    # Safety: cap each answer to avoid huge prompts
+    capped = [(pid, (txt or "")[:1800]) for pid, txt in successful]
+
+    joined = "\n\n".join([f"[{pid}]\n{txt}" for pid, txt in capped])
+
+    return (
+        "You are an expert answer synthesizer.\n"
+        "Task: Produce ONE final answer to the user query using the model answers below.\n"
+        "Rules:\n"
+        "- Merge the best parts, remove repetition.\n"
+        "- If answers conflict, choose the most reasonable and mention uncertainty briefly.\n"
+        "- Be concise, practical, and correct.\n\n"
+        f"User query:\n{user_query}\n\n"
+        f"Model answers:\n{joined}\n\n"
+        "Final answer:"
+    )
+
 import hashlib
 import time
 import asyncio
@@ -5,7 +99,7 @@ from typing import List, Dict, Any
 
 try:
     # When imported as a package module (recommended): `server.orchestrator_v2`
-    from .providers import (  # type: ignore
+    from .providers import (
         GroqProvider,
         GeminiProvider,
         MistralProvider,
@@ -13,16 +107,26 @@ try:
         CohereProvider,
         HuggingFaceProvider,
     )
-except Exception:
-    # When running from within the `server/` directory
-    from providers import (  # type: ignore
-        GroqProvider,
-        GeminiProvider,
-        MistralProvider,
-        CerebrasProvider,
-        CohereProvider,
-        HuggingFaceProvider,
-    )
+except ImportError:
+    try:
+        # When running from within the `server/` directory
+        from server.providers import (
+            GroqProvider,
+            GeminiProvider,
+            MistralProvider,
+            CerebrasProvider,
+            CohereProvider,
+            HuggingFaceProvider,
+        )
+    except ImportError:
+        from providers import (
+            GroqProvider,
+            GeminiProvider,
+            MistralProvider,
+            CerebrasProvider,
+            CohereProvider,
+            HuggingFaceProvider,
+        )
 import os
 from dotenv import load_dotenv
 
@@ -303,7 +407,7 @@ async def orchestrate_query(
     if db:
         from sqlalchemy import select
         try:
-            from .db import Cache  # type: ignore
+            from server.db import Cache  # type: ignore
         except ImportError:
             from db import Cache  # type: ignore
         
@@ -379,7 +483,7 @@ async def orchestrate_query(
             if db and result.get("status") == "success":
                 try:
                     try:
-                        from .db import Cache  # type: ignore
+                        from server.db import Cache  # type: ignore
                     except ImportError:
                         from db import Cache  # type: ignore
                     db.add(Cache(user_id=user_id, query_hash=query_hash, agent_id=provider_id, response_text=result["response_text"]))
@@ -407,18 +511,42 @@ async def orchestrate_query(
             except Exception:
                 pass
     
+
     # Combine all responses
     all_responses = {**cached_responses, **new_responses}
-    
-    # Synthesize
+
+    # ---------- Single final answer synthesis ----------
+    final_answer: str | None = None
+    synth_provider_id = _pick_first_success_provider_id(all_responses)
+
+    if synth_provider_id:
+        try:
+            synth_prompt = _build_synthesis_prompt(query_text, all_responses)
+            synth_result = await PROVIDERS[synth_provider_id].query(synth_prompt, timeout=timeout)
+            if synth_result.get("status") == "success" and (synth_result.get("response_text") or "").strip():
+                final_answer = synth_result["response_text"]
+        except Exception:
+            final_answer = None
+
+    # Fallback if synthesis fails: first successful response
+    if not final_answer:
+        for r in all_responses.values():
+            if r.get("status") == "success" and (r.get("response_text") or "").strip():
+                final_answer = r.get("response_text")
+                break
+    if not final_answer:
+        final_answer = "No provider succeeded. Try again."
+
+    # Synthesize (legacy aggregation)
     synthesis = ResponseSynthesizer.aggregate_responses(all_responses)
-    
+
     # Calculate metadata
     successful = [r for r in all_responses.values() if r.get("status") == "success"]
     response_times = [r.get("response_time_ms", 0) for r in successful if not r.get("cached", False)]
     avg_response_time = sum(response_times) / len(response_times) if response_times else 0
-    
+
     return {
+        "final_answer": final_answer,
         "responses": all_responses,
         "synthesis": synthesis,
         "metadata": {
@@ -432,6 +560,7 @@ async def orchestrate_query(
             "avg_response_time_ms": avg_response_time,
             "cached_count": len(cached_responses),
             "query_hash": query_hash,
+            "synth_provider_id": synth_provider_id,
         }
     }
 

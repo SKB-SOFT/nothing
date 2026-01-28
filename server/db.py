@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 _ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(_ENV_PATH)
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./app.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///../data/app.db")
 
 # Use aiosqlite for async SQLite support
 if "sqlite" in DATABASE_URL and "aiosqlite" not in DATABASE_URL:

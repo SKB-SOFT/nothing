@@ -18,11 +18,17 @@ try:
         orchestrate_query,
         PROVIDER_CONFIGS,
         get_provider_info,
+        validate_all_providers,  # ✅ added
     )
 except ImportError:
     # When running from project root or as server.db
     from server.db import AsyncSessionLocal, User, Query, Response, Cache, init_db  # type: ignore
-    from server.orchestrator_v2 import orchestrate_query, PROVIDER_CONFIGS, get_provider_info  # type: ignore
+    from server.orchestrator_v2 import (
+        orchestrate_query,
+        PROVIDER_CONFIGS,
+        get_provider_info,
+        validate_all_providers,  # ✅ added
+    )
 
 from dotenv import load_dotenv
 import asyncio
@@ -131,10 +137,7 @@ async def get_optional_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: AsyncSession = Depends(get_db)
 ):
-    """Return a user when a valid Bearer token is present; otherwise None.
-
-    This enables a temporary "guest mode" where the app can be used without login.
-    """
+    """Return a user when a valid Bearer token is present; otherwise None."""
     if credentials is None:
         return None
 
@@ -160,7 +163,6 @@ async def get_or_create_guest_user(db: AsyncSession) -> User:
     if existing:
         return existing
 
-    # password is irrelevant for guest mode; still required by schema
     guest = User(
         email=guest_email,
         password_hash=get_password_hash(os.getenv("GUEST_PASSWORD", "guest")),
@@ -177,7 +179,6 @@ async def get_or_create_guest_user(db: AsyncSession) -> User:
 
 @app.post("/api/auth/register")
 async def register(user_data: UserRegister, db: AsyncSession = Depends(get_db)):
-    """Register a new user"""
     result = await db.execute(select(User).where(User.email == user_data.email))
     existing = result.scalar_one_or_none()
 
@@ -207,7 +208,6 @@ async def register(user_data: UserRegister, db: AsyncSession = Depends(get_db)):
 
 @app.post("/api/auth/login")
 async def login(user_data: UserLogin, db: AsyncSession = Depends(get_db)):
-    """Login user and return JWT token"""
     result = await db.execute(select(User).where(User.email == user_data.email))
     user = result.scalar_one_or_none()
 
@@ -228,7 +228,6 @@ async def login(user_data: UserLogin, db: AsyncSession = Depends(get_db)):
 
 @app.get("/api/auth/me")
 async def get_me(current_user: User = Depends(get_current_user)):
-    """Get current user info"""
     return {
         "user": {
             "id": current_user.user_id,
@@ -239,11 +238,42 @@ async def get_me(current_user: User = Depends(get_current_user)):
         }
     }
 
-
 @app.get("/api/providers")
 async def list_providers():
     """Return provider initialization status and defaults."""
     return {"providers": get_provider_info()}
+
+@app.get("/api/providers/validate")
+async def providers_validate():
+    """
+    Actively calls each initialized provider with a tiny prompt and returns pass/fail + reason.
+    """
+    from server.orchestrator_v2 import PROVIDERS  # ensures we reference the live registry
+
+    info = get_provider_info()
+    out = {}
+
+    # Call each provider directly so we can return error_type + error_message
+    for pid, provider in PROVIDERS.items():
+        try:
+            r = await provider.query("Hello", timeout=12)
+            out[pid] = {
+                "ok": r.get("status") == "success",
+                "status": info.get(pid, {}).get("status"),
+                "default_model": info.get(pid, {}).get("default_model"),
+                "error_type": r.get("error_type"),
+                "error_message": r.get("error_message"),
+            }
+        except Exception as e:
+            out[pid] = {
+                "ok": False,
+                "status": info.get(pid, {}).get("status"),
+                "default_model": info.get(pid, {}).get("default_model"),
+                "error_type": "exception",
+                "error_message": str(e)[:160],
+            }
+
+    return {"results": out}
 
 # ==================== QUERY ENDPOINTS ====================
 
@@ -253,19 +283,15 @@ async def submit_query(
     current_user: User | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Submit query to multiple AI agents"""
-
     user = current_user
     if user is None:
         user = await get_or_create_guest_user(db)
 
-    # Validation
     if len(query_data.query_text.strip()) < 5:
         raise HTTPException(status_code=400, detail="Query too short (min 5 chars)")
     if len(query_data.query_text) > 5000:
         raise HTTPException(status_code=400, detail="Query too long (max 5000 chars)")
 
-    # Check daily quota
     today = datetime.now(timezone.utc).date()
     today_start = datetime.combine(today, datetime.min.time()).replace(tzinfo=timezone.utc)
 
@@ -280,12 +306,10 @@ async def submit_query(
     if today_count >= user.quota_daily:
         raise HTTPException(status_code=429, detail="Daily quota exceeded")
 
-    # Validate agents
     for agent_id in query_data.selected_agents:
         if agent_id not in PROVIDER_CONFIGS:
             raise HTTPException(status_code=400, detail=f"Unknown agent: {agent_id}")
 
-    # Create query record
     new_query = Query(
         user_id=user.user_id,
         query_text=query_data.query_text,
@@ -294,7 +318,6 @@ async def submit_query(
     db.add(new_query)
     await db.flush()
 
-    # Orchestrate AI calls
     orch_result = await orchestrate_query(
         user.user_id,
         query_data.query_text,
@@ -302,7 +325,6 @@ async def submit_query(
         db
     )
 
-    # Store responses - orchestrator_v2 returns dict keyed by provider_id
     for provider_id, response_data in orch_result["responses"].items():
         db_response = Response(
             query_id=new_query.query_id,
@@ -318,7 +340,6 @@ async def submit_query(
     await db.commit()
     await db.refresh(new_query)
 
-    # Transform responses dict to list format for frontend
     responses_list = [
         {
             "agent_id": provider_id,
@@ -328,8 +349,7 @@ async def submit_query(
         for provider_id, response_data in orch_result["responses"].items()
     ]
 
-    # ✅ IMPORTANT: use orchestrator's final answer (already Groq-preferred synthesis)
-    final_answer = orch_result.get("final_answer") or "No provider succeeded. Try again."  # <-- changed
+    final_answer = orch_result.get("final_answer") or "No provider succeeded. Try again."
 
     errors = [
         {
@@ -361,7 +381,6 @@ async def get_user_queries(
     limit: int = 20,
     offset: int = 0
 ):
-    """Get user's query history"""
     result = await db.execute(
         select(Query)
         .where(Query.user_id == current_user.user_id)
@@ -373,14 +392,12 @@ async def get_user_queries(
 
     queries_data = []
     for q in queries:
-        result = await db.execute(
-            select(Response).where(Response.query_id == q.query_id)
-        )
+        result = await db.execute(select(Response).where(Response.query_id == q.query_id))
         responses = result.scalars().all()
 
         queries_data.append({
             "query_id": q.query_id,
-            "query_text": q.query_text[:100],  # Truncate for list view
+            "query_text": q.query_text[:100],
             "timestamp": q.query_timestamp.isoformat(),
             "response_count": len(responses),
         })
@@ -393,7 +410,6 @@ async def get_query_details(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get full details of a query"""
     result = await db.execute(
         select(Query).where(
             (Query.query_id == query_id) & (Query.user_id == current_user.user_id)
@@ -404,9 +420,7 @@ async def get_query_details(
     if not query:
         raise HTTPException(status_code=404, detail="Query not found")
 
-    result = await db.execute(
-        select(Response).where(Response.query_id == query_id)
-    )
+    result = await db.execute(select(Response).where(Response.query_id == query_id))
     responses = result.scalars().all()
 
     return {
@@ -428,8 +442,6 @@ async def get_query_details(
         ]
     }
 
-# ==================== ADMIN ENDPOINTS ====================
-
 @app.get("/api/admin/users")
 async def get_all_users(
     current_user: User = Depends(get_current_user),
@@ -437,20 +449,15 @@ async def get_all_users(
     limit: int = 10,
     offset: int = 0
 ):
-    """Get all users (admin only)"""
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
 
-    result = await db.execute(
-        select(User).limit(limit).offset(offset)
-    )
+    result = await db.execute(select(User).limit(limit).offset(offset))
     users = result.scalars().all()
 
     users_data = []
     for user in users:
-        result = await db.execute(
-            select(func.count(Query.query_id)).where(Query.user_id == user.user_id)
-        )
+        result = await db.execute(select(func.count(Query.query_id)).where(Query.user_id == user.user_id))
         query_count = result.scalar() or 0
 
         users_data.append({
@@ -470,7 +477,6 @@ async def get_metrics(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get system metrics (admin only)"""
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
 
@@ -480,9 +486,7 @@ async def get_metrics(
     total_queries = await db.execute(select(func.count(Query.query_id)))
     total_queries = total_queries.scalar() or 0
 
-    result = await db.execute(
-        select(func.avg(Response.response_time_ms))
-    )
+    result = await db.execute(select(func.avg(Response.response_time_ms)))
     avg_response_time = result.scalar() or 0
 
     return {
@@ -492,11 +496,8 @@ async def get_metrics(
         "models": PROVIDER_CONFIGS,
     }
 
-# ==================== HEALTH CHECK ====================
-
 @app.get("/api/health")
 async def health():
-    """Health check endpoint"""
     return {
         "status": "healthy",
         "version": "1.0.0",
@@ -505,15 +506,12 @@ async def health():
 
 @app.get("/")
 async def root():
-    """Root endpoint"""
     return {
         "name": "Multi-AI Orchestrator API",
         "version": "1.0.0",
         "docs": "/docs",
         "models": list(PROVIDER_CONFIGS.keys())
     }
-
-# ==================== RUN SERVER ====================
 
 if __name__ == "__main__":
     import uvicorn

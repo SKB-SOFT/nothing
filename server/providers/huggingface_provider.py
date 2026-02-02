@@ -40,6 +40,8 @@ class HuggingFaceProvider(BaseProvider):
         }
 
         try:
+            headers = {"Authorization": f"Bearer {self.api_key}"}
+            
             async def _attempt(url: str):
                 async with session.post(
                     url,

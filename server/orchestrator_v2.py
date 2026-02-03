@@ -14,34 +14,14 @@ load_dotenv(_ENV_PATH)
 
 # ==================== PROVIDER IMPORTS ====================
 
-try:
-    from .providers import (  # type: ignore
-        GroqProvider,
-        GeminiProvider,
-        MistralProvider,
-        CerebrasProvider,
-        CohereProvider,
-        HuggingFaceProvider,
-    )
-except Exception:
-    try:
-        from server.providers import (  # type: ignore
-            GroqProvider,
-            GeminiProvider,
-            MistralProvider,
-            CerebrasProvider,
-            CohereProvider,
-            HuggingFaceProvider,
-        )
-    except Exception:
-        from providers import (  # type: ignore
-            GroqProvider,
-            GeminiProvider,
-            MistralProvider,
-            CerebrasProvider,
-            CohereProvider,
-            HuggingFaceProvider,
-        )
+from server.providers import (
+    GroqProvider,
+    GeminiProvider,
+    MistralProvider,
+    CerebrasProvider,
+    CohereProvider,
+    HuggingFaceProvider,
+)
 
 # ==================== SETTINGS ====================
 

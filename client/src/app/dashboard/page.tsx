@@ -7,6 +7,7 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 
 import DashboardComponent from '@/views/dashboard/Dashboard';
+import { QueryHistory } from '@/components/dashboard/QueryHistory';
 import {
   AppBar,
   Avatar,
@@ -82,6 +83,9 @@ const MODELS = [
 ];
 
 export default function DashboardPerplexity() {
+  // Sidebar state for QueryHistory drawer
+  const [showHistory, setShowHistory] = useState(false);
+  const [selectedHistoryId, setSelectedHistoryId] = useState<number | null>(null);
   const router = useRouter();
   const { user, token, loading: authLoading, logout } = useAuth();
 
@@ -266,7 +270,19 @@ export default function DashboardPerplexity() {
             <AddIcon />
           </IconButton>
           <Divider sx={{ width: '80%', mb: 2 }} />
-          <IconButton size="medium" sx={{ color: '#fff', background: 'rgba(59,130,246,0.08)', mb: 2, '&:hover': { background: '#3b82f6', color: '#fff' } }}><LibraryBooksIcon /></IconButton>
+          <IconButton
+            size="medium"
+            onClick={() => setShowHistory((v) => !v)}
+            sx={{
+              color: showHistory ? '#3b82f6' : '#fff',
+              background: showHistory ? 'rgba(59,130,246,0.18)' : 'rgba(59,130,246,0.08)',
+              mb: 2,
+              '&:hover': { background: '#3b82f6', color: '#fff' },
+              border: showHistory ? '2px solid #3b82f6' : undefined,
+            }}
+          >
+            <LibraryBooksIcon />
+          </IconButton>
           <IconButton size="medium" sx={{ color: '#fff', background: 'rgba(59,130,246,0.08)', mb: 2, '&:hover': { background: '#3b82f6', color: '#fff' } }}><MoreHorizIcon /></IconButton>
           <Box sx={{ flex: 1 }} />
           <IconButton size="medium" sx={{ color: '#fff', background: 'rgba(59,130,246,0.08)', mb: 2, '&:hover': { background: '#3b82f6', color: '#fff' } }}><NotificationsNoneIcon /></IconButton>
@@ -294,6 +310,37 @@ export default function DashboardPerplexity() {
             </MenuItem>
           </Menu>
         </Drawer>
+
+        {/* QueryHistory Drawer */}
+        {showHistory && (
+          <Box sx={{ position: 'fixed', left: drawerWidth, top: 0, bottom: 0, width: 340, zIndex: 1200, bgcolor: '#0B1220', borderRight: '1.5px solid #16213a', boxShadow: '2px 0 24px 0 #0a192f33', p: 0 }}>
+            <QueryHistory
+              onSelect={async (query) => {
+                setShowHistory(false);
+                setSelectedHistoryId(query.query_id);
+                try {
+                  const res = await queryAPI.getDetails(query.query_id);
+                  const details = res.data;
+                  // Convert details.responses to messages
+                  const msgs = [
+                    { role: 'user', content: details.query_text, timestamp: new Date(details.timestamp).getTime() },
+                    ...((details.responses || []).map((r) => ({
+                      role: 'assistant',
+                      content: r.response_text,
+                      model: r.agent_name,
+                      timestamp: undefined,
+                    })) || [])
+                  ];
+                  setMessages(msgs);
+                } catch (err) {
+                  // fallback: just close history
+                }
+              }}
+              selectedId={selectedHistoryId}
+              onClose={() => setShowHistory(false)}
+            />
+          </Box>
+        )}
 
         {/* Main Content */}
         <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', background: 'linear-gradient(120deg, #0a192f 0%, #1a2236 100%)', minHeight: '100vh' }}>

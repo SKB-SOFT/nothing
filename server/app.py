@@ -11,26 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 
-try:
-    # When imported as a package module (recommended): `uvicorn server.main:app`
-    from .db import AsyncSessionLocal, User, Query, Response, Cache, init_db  # type: ignore
-    from .orchestrator_v2 import (
-        orchestrate_query,
-        PROVIDER_CONFIGS,
-        get_provider_info,
-        validate_all_providers,  # ✅ added
-    )
-    from .routes.dashboard import router as dashboard_router  # type: ignore
-except ImportError:
-    # When running from project root or as server.db
-    from server.db import AsyncSessionLocal, User, Query, Response, Cache, init_db  # type: ignore
-    from server.orchestrator_v2 import (
-        orchestrate_query,
-        PROVIDER_CONFIGS,
-        get_provider_info,
-        validate_all_providers,  # ✅ added
-    )
-    from server.routes.dashboard import router as dashboard_router  # type: ignore
+from server.db import AsyncSessionLocal, User, Query, Response, Cache, init_db  # type: ignore
+from server.orchestrator_v2 import (
+    orchestrate_query,
+    PROVIDER_CONFIGS,
+    get_provider_info,
+    validate_all_providers,  # ✅ added
+)
+from server.routes.dashboard import router as dashboard_router  # type: ignore
 
 from dotenv import load_dotenv
 import asyncio
@@ -381,14 +369,19 @@ async def submit_query(
 
 @app.get("/api/queries")
 async def get_user_queries(
-    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     limit: int = 20,
-    offset: int = 0
+    offset: int = 0,
+    current_user: User | None = Depends(get_optional_user),
 ):
+    # If not authenticated, fallback to guest user (like /api/query)
+    user = current_user
+    if user is None:
+        user = await get_or_create_guest_user(db)
+
     result = await db.execute(
         select(Query)
-        .where(Query.user_id == current_user.user_id)
+        .where(Query.user_id == user.user_id)
         .order_by(Query.query_timestamp.desc())
         .limit(limit)
         .offset(offset)

@@ -11,5 +11,16 @@ services:
       - ./brain.db:/app/brain.db  # Persist logs
     restart: unless-stopped
 
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./dashboard:/app
+      - /app/node_modules
+    restart: unless-stopped
+    depends_on:
+      - world-brain
+
 volumes:
   brain_data:

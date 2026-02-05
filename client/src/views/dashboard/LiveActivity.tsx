@@ -61,7 +61,7 @@ const LiveActivity: React.FC<Props> = ({ activities }) => {
       <VStack spacing={0} align="stretch" maxH="600px" overflowY="auto">
         {activities.length === 0 ? (
           <Box textAlign="center" py={8}>
-            <Text color="gray.500">No recent activity</Text>
+            <Text color="black">No recent activity</Text>
           </Box>
         ) : (
           activities.map((activity, index) => (
@@ -95,12 +95,12 @@ const LiveActivity: React.FC<Props> = ({ activities }) => {
                       <Text fontSize="sm" fontWeight="medium">
                         {activity.agent_name || activity.agent_id}
                       </Text>
-                      <Text fontSize="xs" color="gray.500">
+                      <Text fontSize="xs" color="black">
                         {new Date(activity.timestamp).toLocaleTimeString()}
                       </Text>
                     </HStack>
 
-                    <Text fontSize="sm" color="gray.600" mb={2}>
+                    <Text fontSize="sm" color="black" mb={2}>
                       {activity.type === 'request' ? 'Request processed' : 'Error occurred'}
                     </Text>
 

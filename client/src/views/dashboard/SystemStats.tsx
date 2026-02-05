@@ -1,4 +1,3 @@
-// src/views/dashboard/components/SystemStats.tsx
 import React from 'react'
 import {
   Box,
@@ -68,14 +67,14 @@ const StatCard: React.FC<StatCardProps> = ({
             {stat}
           </StatNumber>
           {(change !== undefined || helpText) && (
-            <StatHelpText mb={0} fontSize="xs" color="#3b82f6" fontWeight="500" fontFamily="Inter, Space Grotesk, ui-sans-serif">
+            <StatHelpText mb={0} fontSize="xs" color="#000" fontWeight="500" fontFamily="Inter, Space Grotesk, ui-sans-serif">
               {change !== undefined && (
                 <>
                   <StatArrow type={change >= 0 ? 'increase' : 'decrease'} />
-                  <span style={{ color: '#3b82f6', fontWeight: 600 }}>{Math.abs(change).toFixed(1)}%</span>
+                  <span style={{ color: '#000', fontWeight: 600 }}>{Math.abs(change).toFixed(1)}%</span>
                 </>
               )}
-              {helpText && <span style={{ color: '#b6c2e2', fontWeight: 500 }}>{` ${helpText}`}</span>}
+              {helpText && <span style={{ color: '#000', fontWeight: 500 }}>{` ${helpText}`}</span>}
             </StatHelpText>
           )}
         </Stat>

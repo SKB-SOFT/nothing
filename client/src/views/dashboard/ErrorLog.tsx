@@ -97,7 +97,7 @@ const ErrorLog: React.FC<Props> = ({ errors, loading }) => {
       <VStack spacing={3} align="stretch" maxH="600px" overflowY="auto">
         {errors.length === 0 ? (
           <Box textAlign="center" py={8}>
-            <Text color="gray.500">No errors logged</Text>
+            <Text color="black">No errors logged</Text>
           </Box>
         ) : (
           errors.map((error, idx) => {
@@ -138,19 +138,19 @@ const ErrorLog: React.FC<Props> = ({ errors, loading }) => {
                   {error.agent_id}
                 </Text>
 
-                <Text fontSize="sm" color="gray.600" mb={2} noOfLines={isExpanded ? undefined : 2}>
+                <Text fontSize="sm" color="black" mb={2} noOfLines={isExpanded ? undefined : 2}>
                   {error.error_message}
                 </Text>
 
                 <Collapse in={isExpanded}>
                   <Box mt={3} p={3} bg={useColorModeValue('gray.100', 'gray.900')} borderRadius="md">
-                    <Text fontSize="xs" fontFamily="mono" color="gray.600">
+                    <Text fontSize="xs" fontFamily="mono" color="black">
                       {error.error_message}
                     </Text>
                   </Box>
                 </Collapse>
 
-                <Text fontSize="xs" color="gray.500" mt={2}>
+                <Text fontSize="xs" color="black" mt={2}>
                   {new Date(error.timestamp).toLocaleString()}
                 </Text>
               </Box>

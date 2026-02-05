@@ -13,6 +13,7 @@ import time
 import psutil
 import asyncio
 from enum import Enum
+from server.services.metrics_db import MetricsDB
 
 # ==================== MODELS ====================
 
@@ -269,6 +270,67 @@ async def log_error(error: AgentError):
     })
     
     return {"status": "logged"}
+
+# ==================== REAL METRICS ENDPOINTS ====================
+# These return actual data from the metrics database
+
+@router.get("/metrics/timeline")
+async def get_metrics_timeline(hours: int = Query(24, ge=1, le=168)):
+    """Get raw metrics timeline for the last N hours.
+    
+    Returns data like:
+    [
+        {"timestamp": "2026-02-05T10:30:45", "agent": "groq", "latency": 245.5, "success": true, "tokens": 150},
+        ...
+    ]
+    """
+    MetricsDB.init()
+    return {"metrics": MetricsDB.get_metrics_timeline(hours)}
+
+@router.get("/metrics/agents")
+async def get_agent_metrics(hours: int = Query(24, ge=1, le=168)):
+    """Get aggregated metrics per agent.
+    
+    Returns performance stats for each AI provider:
+    [
+        {
+            "agent": "groq",
+            "total_requests": 145,
+            "successful": 142,
+            "failed": 3,
+            "success_rate": 97.93,
+            "avg_latency_ms": 245.32,
+            "min_latency_ms": 150,
+            "max_latency_ms": 890,
+            "total_tokens": 24560
+        },
+        ...
+    ]
+    """
+    MetricsDB.init()
+    return {"agents": MetricsDB.get_agent_stats(hours)}
+
+@router.get("/metrics/success-rate")
+async def get_success_rate(hours: int = Query(24, ge=1, le=168)):
+    """Get overall success rate percentage."""
+    MetricsDB.init()
+    rate = MetricsDB.get_success_rate(hours)
+    return {"success_rate": round(rate, 2), "hours": hours}
+
+@router.get("/metrics/latency-percentiles")
+async def get_latency_percentiles(hours: int = Query(24, ge=1, le=168)):
+    """Get latency percentiles (p50, p95, p99).
+    
+    Helps you understand if most queries are fast (p50) or if there are slow outliers (p99)
+    """
+    MetricsDB.init()
+    percentiles = MetricsDB.get_latency_percentiles(hours)
+    return {
+        "p50_ms": round(percentiles["p50"], 2),  # 50% of queries faster than this
+        "p95_ms": round(percentiles["p95"], 2),  # 95% of queries faster than this
+        "p99_ms": round(percentiles["p99"], 2),  # 99% of queries faster than this
+        "avg_ms": round(percentiles["avg"], 2)
+    }
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):

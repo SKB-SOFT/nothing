@@ -99,7 +99,7 @@ const AgentStatus: React.FC<Props> = ({ agents, loading }) => {
             {agents.length === 0 ? (
               <Tr>
                 <Td colSpan={7} textAlign="center" py={8}>
-                  <Text color="gray.500">No agents active</Text>
+                  <Text color="black">No agents active</Text>
                 </Td>
               </Tr>
             ) : (
@@ -140,7 +140,7 @@ const AgentStatus: React.FC<Props> = ({ agents, loading }) => {
                       </Box>
                     </Tooltip>
                   </Td>
-                  <Td fontSize="xs" color="gray.500">
+                  <Td fontSize="xs" color="black">
                     {new Date(agent.last_used).toLocaleTimeString()}
                   </Td>
                 </Tr>
